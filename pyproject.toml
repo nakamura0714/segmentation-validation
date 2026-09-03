@@ -1,0 +1,36 @@
+[project]
+name = "segmentation-validation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.2",
+    "opencv-python>=5.0.0.93",
+    "pandas>=3.0.5",
+    "pillow>=12.3.0",
+    "pydicom>=3.0.2",
+]
+
+[project.scripts]
+segmentation-validation = "segmentation_validation:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.5",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.format]
+quote-style = "double"
