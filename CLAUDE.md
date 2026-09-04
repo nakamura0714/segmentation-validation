@@ -39,7 +39,23 @@ JSONには以下のようなデータへのパスが含まれる。
 - セグメンテーションマスク画像
 - その他の医用画像関連ファイル
 
+# Dataset conventions
 
+このプロジェクトで扱う Dataset / Prediction の YAML・JSON は、
+`docs/dataset_format.md` の仕様に従うこと。
+
+データセットの読み込み、変換、バリデーション処理を実装・修正する際は、
+必ず `docs/dataset_format.md` を参照すること。
+
+特に以下を自己判断で変更しないこと。
+
+- meta / samples / structure の構造
+- type / multiple の解釈
+- null と [] の扱い
+- Mask2D / Mask3D の表現
+- SpatialResolution の扱い
+- Dataset と Prediction の違い
+- validation rules
 ## JSON内のデータパスの解決方法
 
 JSON内に記載されているファイルパスは相対パスだが、
@@ -86,3 +102,4 @@ mask_path = ANNOTATION_ROOT / path_mask_from_json
 
 if path_original_mask_from_json is not None:
     original_mask_path = ANNOTATION_ROOT / path_original_mask_from_json
+
