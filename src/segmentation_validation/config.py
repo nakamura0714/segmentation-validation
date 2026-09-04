@@ -207,7 +207,10 @@ class ReviewConfig:
     # 医用レビューなので既定は可逆。jpeg にすると容量が 1/5 程度になる。
     image_format: str = "png"
     jpeg_quality: int = 92
-    export_all_files: bool = True
+    # 目視対象だけでなく全画像を FiftyOne に載せるか。既定は載せない ——
+    # DICOM の全画素読みが1枚1〜3秒なので、1083枚だと 25〜30分 / 約2GB かかる。
+    # keep になった画像も見たくなったら true にする（`--all` でも同じ）。
+    export_all_files: bool = False
     dataset_name: str = "pi6-validation"
     app_port: int = 5151
     # 未設定なら $FIFTYONE_DATABASE_DIR、それも無ければ FiftyOne の既定に従う。

@@ -295,7 +295,31 @@ uv run segmentation-validation review build
 - **初回は6〜9分**（実測 6分29秒 / 8分46秒）。210 Sample / 521 Detection /
   画像210・マスク473・バンド150 で **397MB**。DICOM の全画素読みが1枚1〜3秒
 - 2回目以降は既存アセットを飛ばして**約1分**（実測 54秒）
-- 全1083枚を載せたいときは `--all`
+
+> **既定では「目視対象の画像」しか載らない。** ただしその210枚に含まれる
+> **keep の annotation は既に載っている** —— manifest はその画像の全 annotation を
+> 入れるので、pending 251 に対して Detection は 521 ある。
+> 目視対象の隣にある正常な annotation を文脈として見られる。
+
+#### keep になった画像も全部 FiftyOne で見たいとき
+
+```bash
+# 単発で
+uv run segmentation-validation review build --all
+
+# ずっとそうしたいなら config で（--all と同じ意味。--all が config を上書きする）
+uv run segmentation-validation --set review.export_all_files=true review build
+```
+
+| | 既定 | 全画像 |
+|---|---|---|
+| 画像 | 210 | **1083** |
+| 容量 | 397MB | **約2GB** |
+| 初回 | 6〜9分 | **約25〜30分** |
+
+既存アセットはスキップするので、既定で1周したあとに切り替えても差分だけ書き出す。
+**保存ビュー6つは pending で絞っている**ので、keep の画像を見るときは App 側で
+フィルタを外すか `image_class` / `review_status` で絞る。
 
 > ★**`review build` の前に必ず `review export` する。**
 > `review build` は FiftyOne dataset を作り直すので、**export していない判定は消える**。
@@ -949,6 +973,9 @@ uv run segmentation-validation --config config/my.json <cmd>
 --set review.app_port=5151
 --set review.database_dir=/local/disk/mongo
 --set review.image_format=jpeg   # PNG(可逆)→JPEGで容量1/5。既定はPNG
+
+# keep になった画像も含めて全1083枚を FiftyOne に載せる（約2GB / 初回25〜30分）
+--set review.export_all_files=true
 ```
 
 **閾値を変えたら `check` → `select` → `report` → `gui` を回す。** `scan` は不要

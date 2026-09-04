@@ -132,7 +132,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--all",
         dest="all_images",
         action="store_true",
-        help="目視対象だけでなく全画像を書き出す（DICOM全画素読みで時間がかかる）",
+        help="目視対象だけでなく全画像を書き出す（DICOM全画素読みで時間がかかる。"
+        "config の review.export_all_files でも指定できる）",
     )
     rbuild.add_argument("--force", action="store_true", help="既存のアセットも作り直す")
     rbuild.add_argument(
@@ -731,16 +732,33 @@ def _review_build(config: Config, args: argparse.Namespace) -> int:
     pending_images = {
         d.file_uid for d in image_decisions if d.final_decision is Decision.PENDING
     }
+    # 全画像を載せるかは config でも指定できる（`review.export_all_files`）。
+    # keep になった画像も FiftyOne で見たいときに使う。`--all` は config を上書きする。
+    include_all = args.all_images or config.review.export_all_files
+    source = (
+        "--all"
+        if args.all_images
+        else "review.export_all_files=true"
+        if config.review.export_all_files
+        else ""
+    )
     groups = select_review_groups(
-        context.groups, pending_uids, pending_images, include_all=args.all_images
+        context.groups, pending_uids, pending_images, include_all=include_all
     )
     logger.info(
         "目視対象: annotation %d 件 / 画像 %d 枚 -> 書き出す画像 %d 枚%s",
         len(pending_uids),
         len(pending_images),
         len(groups),
-        "（--all 指定）" if args.all_images else "",
+        f"（全画像: {source}）" if include_all else "",
     )
+    if include_all:
+        # 未書き出しの枚数で警告する。2回目以降は既存をスキップするので速い。
+        logger.warning(
+            "全 %d 画像を書き出す。DICOMの全画素読みが1枚1〜3秒かかるので"
+            "初回は25〜30分・約2GB になる（既存アセットはスキップする）",
+            len(groups),
+        )
 
     adapters = {a.dataset_id: a.reference_mask_path for a in open_adapters(config)}
     review_dir = _review_dir(config)
