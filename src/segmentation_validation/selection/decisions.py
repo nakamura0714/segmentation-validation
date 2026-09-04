@@ -44,6 +44,9 @@ class ReviewStatus(StrEnum):
 
 class Reason(StrEnum):
     NO_ISSUE = "no_issue_detected"
+    # config.validation.target_labels の対象外。チェックを走らせていない。
+    # 「検証して問題なし」と混ぜないために別の理由にする。
+    OUT_OF_SCOPE = "out_of_scope"
     # 一部の check が判定不能のまま keep した（体外判定が未実施 等）。
     # 「検査して問題なし」と区別するために別 reason にする。
     KEPT_WITHOUT_FULL_CHECK = "kept_without_full_check"
@@ -89,6 +92,9 @@ class SelectionDecision:
     dataset_id: str
     source_json: str
     institution: str
+    # 医用データなので症例単位で追える必要がある。1患者が複数 study を持つ例が実在する
+    # （実測: 51患者が2件以上、最大5件）ので patient と study は別に持つ。
+    patient_id: str
     study: str
     series: str
     file_id: str
@@ -129,6 +135,7 @@ COLUMNS: tuple[str, ...] = (
     "dataset_id",
     "source_json",
     "institution",
+    "patient_id",
     "study",
     "series",
     "file_id",
@@ -182,12 +189,35 @@ def policy_for(check_id: str, config: Config) -> Policy:
     return result
 
 
+def effective_review_required(
+    check_id: str, status: CheckStatus, config: Config
+) -> bool:
+    """この Issue が実際に目視対象になるか。
+
+    ポリシーだけでは決まらない。``status`` も見る必要がある:
+
+    - ``NOT_APPLICABLE``    このデータには適用されない記録 → 目視不要
+    - ``CANNOT_DETERMINE``  検査できなかった
+      → ``cannot_determine_as_review_required`` に従う
+    - ``CHECKED``           判定した → ポリシーに従う
+
+    ``issues.csv`` の列と ``build_decisions`` の判断が食い違わないよう、
+    両方ここを通す。
+    """
+    if status is CheckStatus.NOT_APPLICABLE:
+        return False
+    if status is CheckStatus.CANNOT_DETERMINE:
+        return config.decision_policy.cannot_determine_as_review_required
+    return policy_for(check_id, config) is Policy.REVIEW_REQUIRED
+
+
 def build_decisions(
     records: Iterable[AnnotationRecord],
     issues: Iterable[Issue],
     config: Config,
     automatic: Mapping[str, AutomaticDecision] | None = None,
     human: Mapping[str, HumanDecision] | None = None,
+    out_of_scope: frozenset[str] = frozenset(),
 ) -> list[SelectionDecision]:
     """全 annotation の採否を確定する。
 
@@ -199,7 +229,8 @@ def build_decisions(
        4へ進む
     4. review_required な Issue がある → pending
     5. cannot_determine を返した check がある → keep（``kept_without_full_check``）
-    6. それ以外 → keep（``no_issue_detected``）
+    6. 検証対象外 → keep（``out_of_scope``）
+    7. それ以外 → keep（``no_issue_detected``）
 
     3が重要。D01 で残った側が体外領域にも引っかかっていれば pending にする。
     片方のチェックだけで採用を決めない。
@@ -217,12 +248,12 @@ def build_decisions(
         uid = issue.geometry_uid
         if uid is None:
             continue
-        policy = policy_for(issue.check_id, config)
+
+        if effective_review_required(issue.check_id, issue.status, config):
+            review_flag[uid] = True
 
         if issue.status is CheckStatus.CANNOT_DETERMINE:
             _append_unique(unverified.setdefault(uid, []), issue.check_id)
-            if config.decision_policy.cannot_determine_as_review_required:
-                review_flag[uid] = True
             continue
         if issue.status is CheckStatus.NOT_APPLICABLE:
             continue
@@ -233,8 +264,6 @@ def build_decisions(
             severity.get(uid, NONE), 0
         ):
             severity[uid] = issue.severity.value
-        if policy is Policy.REVIEW_REQUIRED:
-            review_flag[uid] = True
 
     decisions: list[SelectionDecision] = []
     for record in records:
@@ -261,6 +290,10 @@ def build_decisions(
             decision = Decision.KEEP
             reason = Reason.KEPT_WITHOUT_FULL_CHECK.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
+        elif uid in out_of_scope:
+            decision = Decision.KEEP
+            reason = Reason.OUT_OF_SCOPE.value
+            source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
         else:
             decision, reason = Decision.KEEP, Reason.NO_ISSUE.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
@@ -271,6 +304,7 @@ def build_decisions(
                 dataset_id=record.dataset_id,
                 source_json=record.source_json,
                 institution=record.institution,
+                patient_id=record.patient_id,
                 study=record.study,
                 series=record.series,
                 file_id=record.file,
@@ -327,6 +361,11 @@ def summarize(decisions: list[SelectionDecision]) -> dict[str, Any]:
     uncertain = by_decision.get(Decision.UNCERTAIN.value, 0)
     return {
         "total": len(decisions),
+        "cases": count_cases(decisions),
+        "case_status": count_case_status(decisions),
+        "cases_pending": count_cases(
+            [d for d in decisions if d.final_decision is Decision.PENDING]
+        ),
         "by_decision": by_decision,
         "by_reason": by_reason,
         "by_source": by_source,
@@ -338,6 +377,98 @@ def summarize(decisions: list[SelectionDecision]) -> dict[str, Any]:
         "uncertain": uncertain,
         "ready_to_build": pending == 0 and uncertain == 0,
     }
+
+
+def count_cases(decisions: Iterable[SelectionDecision]) -> dict[str, int]:
+    """症例数を階層ごとに数える。
+
+    annotation 数だけでは目視の実作業量が分からない。1画像に複数 annotation が
+    あり、1患者が複数 study を持つ（実測で51患者）ので、患者 / study / 画像を
+    それぞれ数える。データセットを跨いだ同名を混ぜないよう dataset_id を含める。
+    """
+    patients, studies, series, files = set(), set(), set(), set()
+    total = 0
+    for d in decisions:
+        total += 1
+        patients.add((d.dataset_id, d.patient_id))
+        studies.add((d.dataset_id, d.study))
+        series.add((d.dataset_id, d.study, d.series))
+        files.add(d.file_uid)
+    return {
+        "patients": len(patients),
+        "studies": len(studies),
+        "series": len(series),
+        "images": len(files),
+        "annotations": total,
+    }
+
+
+class CaseStatus(StrEnum):
+    """症例（画像 / study / 患者）単位の状態。
+
+    annotation の採否は症例単位では**排他にならない**。1画像に keep と pending が
+    混在する例が216件あるので、採否ごとの画像数を足すと実画像数を超える。
+    「何症例が合格したか」を言うには、症例が持つ annotation 全体から
+    1つの状態を導く必要がある。
+    """
+
+    PASSED = "passed"  # 全 annotation が keep
+    PARTIAL = "partial"  # 一部を除外して確定した
+    ALL_EXCLUDED = "all_excluded"  # 全 annotation を除外した
+    NEEDS_REVIEW = "needs_review"  # pending / uncertain が残っている
+    NO_ANNOTATION = "no_annotation"  # annotation を持たない
+
+
+CASE_STATUS_JA = {
+    CaseStatus.PASSED: "合格（全keep）",
+    CaseStatus.PARTIAL: "一部除外して確定",
+    CaseStatus.ALL_EXCLUDED: "全除外",
+    CaseStatus.NEEDS_REVIEW: "要目視",
+    CaseStatus.NO_ANNOTATION: "annotationなし",
+}
+
+
+def case_status(decisions: Iterable[SelectionDecision]) -> CaseStatus:
+    """1症例が持つ annotation 群から、その症例の状態を1つ決める。
+
+    未確定が1件でもあれば症例全体が未確定。安全側に倒す。
+    """
+    values = {d.final_decision for d in decisions}
+    if not values:
+        return CaseStatus.NO_ANNOTATION
+    if Decision.PENDING in values or Decision.UNCERTAIN in values:
+        return CaseStatus.NEEDS_REVIEW
+    if Decision.KEEP in values:
+        return CaseStatus.PARTIAL if Decision.EXCLUDE in values else CaseStatus.PASSED
+    return CaseStatus.ALL_EXCLUDED
+
+
+def count_case_status(
+    decisions: Iterable[SelectionDecision],
+) -> dict[str, dict[str, int]]:
+    """画像 / study / 患者 それぞれについて状態別の症例数を数える。
+
+    これが「何症例が合格したか」の答え。採否ごとの症例数（``count_cases``）とは
+    別物で、あちらは重複するのでレベル間で合計が一致しない。
+    """
+    levels: dict[str, dict[tuple, list[SelectionDecision]]] = {
+        "images": {},
+        "studies": {},
+        "patients": {},
+    }
+    for d in decisions:
+        levels["images"].setdefault((d.file_uid,), []).append(d)
+        levels["studies"].setdefault((d.dataset_id, d.study), []).append(d)
+        levels["patients"].setdefault((d.dataset_id, d.patient_id), []).append(d)
+
+    result: dict[str, dict[str, int]] = {}
+    for level, groups in levels.items():
+        counts = {status.value: 0 for status in CaseStatus}
+        for members in groups.values():
+            counts[case_status(members).value] += 1
+        counts["total"] = len(groups)
+        result[level] = counts
+    return result
 
 
 def assert_invariants(

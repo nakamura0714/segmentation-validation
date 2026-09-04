@@ -7,6 +7,10 @@
 ``exclude`` の結果 annotation が0件になった file entry は**削除せず
 ``annotations: []`` として残す**。取り除くと annotation の除外によって
 元の画像母集団が黙って変わってしまう。
+
+★ただし ``image_decisions`` で画像そのものが ``exclude`` と判定された場合は
+**file entry ごと落とす**。これは「画像を落とす」という明示的な判断があった場合
+（側面像など）だけで、annotation の除外による副作用ではない。
 """
 
 from __future__ import annotations
@@ -38,6 +42,9 @@ class BuildResult:
 
     path: Path
     kept: int = 0
+    images_total: int = 0
+    images_dropped: int = 0
+    images_pending: int = 0
     excluded: int = 0
     pending: int = 0
     uncertain: int = 0
@@ -57,10 +64,12 @@ def build_development_json(
     pending_as: str | None = None,
     uncertain_as: str | None = None,
     meta_extra: dict[str, Any] | None = None,
+    image_decisions: Mapping[str, str] | None = None,
 ) -> BuildResult:
     """1つの元JSONから開発用JSONを作る。
 
-    ``decisions`` は ``geometry_uid -> final_decision``。
+    ``decisions`` は ``geometry_uid -> final_decision``、
+    ``image_decisions`` は ``file_uid -> final_decision``。
     ``pending_as`` / ``uncertain_as`` は override が指定されたときだけ渡す。
     未指定のまま該当が残っていれば呼び出し側で止めるのが前提だが、
     ここでも黙って落とさないよう ``unknown`` として数える。
@@ -75,10 +84,30 @@ def build_development_json(
     if uncertain_as:
         result.overrides["uncertain_as"] = uncertain_as
 
-    for studies in payload.get("dataset", {}).values():
-        for study in studies.values():
-            for series in study.get("series_list", {}).values():
-                for file_rec in series.get("file_list", {}).values():
+    images = image_decisions or {}
+    source_json = source_path.name
+    for institution, studies in payload.get("dataset", {}).items():
+        for study_key, study in studies.items():
+            for series_key, series in study.get("series_list", {}).items():
+                file_list = series.get("file_list", {})
+                # 画像そのものを落とすと判定されたものを先に取り除く。
+                dropped = []
+                for file_key in list(file_list):
+                    uid = (
+                        f"{source_json}::{institution}"
+                        f"/{study_key}/{series_key}/{file_key}"
+                    )
+                    verdict = images.get(uid)
+                    result.images_total += 1
+                    if verdict == Decision.PENDING.value:
+                        result.images_pending += 1
+                    if verdict == Decision.EXCLUDE.value:
+                        dropped.append(file_key)
+                for file_key in dropped:
+                    del file_list[file_key]
+                    result.images_dropped += 1
+
+                for file_rec in file_list.values():
                     result.files_total += 1
                     original = file_rec.get("annotations") or []
                     kept: list[dict[str, Any]] = []
@@ -108,6 +137,8 @@ def build_development_json(
         "files_total": result.files_total,
         "files_emptied": result.files_emptied,
         "files_already_empty": result.files_already_empty,
+        "images_total": result.images_total,
+        "images_dropped": result.images_dropped,
         "overrides": result.overrides,
         **(meta_extra or {}),
     }

@@ -136,7 +136,9 @@ class EngineerSetAdapter:
         source_json = self.source_path.name
         for institution, studies in self._dataset.items():
             for study_key, study in studies.items():
+                study_labels = _case_labels(study)
                 for series_key, series in study.get("series_list", {}).items():
+                    case_labels = study_labels + _case_labels(series)
                     shape = _shape_of(series)
                     spacing = _spacing_of(series)
                     manufacturer = series.get("manufacturer")
@@ -163,7 +165,9 @@ class EngineerSetAdapter:
                                 file_rec.get("annotations") or []
                             )
                         )
-                        yield FileGroup(**common, records=records)
+                        yield FileGroup(
+                            **common, records=records, case_labels=case_labels
+                        )
 
     def iter_annotations(self) -> Iterator[AnnotationRecord]:
         for group in self.iter_files():
@@ -251,6 +255,18 @@ def open_adapters(config: Config) -> list[EngineerSetAdapter]:
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _case_labels(container: dict[str, Any]) -> tuple:
+    """study / series レベルの分類ラベルを集める。
+
+    これらは ``annotation_id`` を持つ別スキーマで geometry ではないが、
+    「この症例は正常例か」を知る唯一の手掛かりなので捨てない。
+    """
+    labels: list = []
+    for annotation in container.get("annotations") or []:
+        labels.extend(parse_labels(annotation.get("labels") or []))
+    return tuple(dict.fromkeys(labels))
 
 
 def _shape_of(series: dict[str, Any]) -> tuple[int, int] | None:

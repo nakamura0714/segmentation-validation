@@ -53,3 +53,37 @@ def _to_row(decision: SelectionDecision) -> dict[str, Any]:
 def _blank_none(value: Any) -> Any:
     """CSVで ``None`` が文字列 ``"None"`` になるのを防ぐ。"""
     return "" if value is None else value
+
+
+def write_image_csv(path: Path, decisions: Sequence[Any]) -> None:
+    """``image_decisions.csv``。1画像 = 1行。"""
+    from ..selection.image_decisions import COLUMNS as IMAGE_COLUMNS
+    from ..selection.image_decisions import to_row
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=IMAGE_COLUMNS)
+        writer.writeheader()
+        for decision in decisions:
+            writer.writerow(to_row(decision))
+
+
+def write_image_json(
+    path: Path, decisions: Sequence[Any], meta: dict[str, Any]
+) -> None:
+    from ..selection.image_decisions import summarize_images, to_row
+
+    payload = {
+        "meta": {**meta, "generated_at": datetime.now(timezone.utc).isoformat()},
+        "summary": summarize_images(list(decisions)),
+        "decisions": [to_row(d) for d in decisions],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_image_json(path: Path) -> list[dict[str, Any]]:
+    """``build-dataset`` が画像単位の採否を読み戻す。"""
+    if not path.exists():
+        return []
+    return json.loads(path.read_text(encoding="utf-8"))["decisions"]

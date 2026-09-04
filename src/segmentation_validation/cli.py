@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,11 +17,22 @@ from .adapters import open_adapters
 from .checks import ALL_CHECKS, requires_scan, selected_checks
 from .checks.base import CheckContext, Issue, Severity
 from .config import Config, dump_config, load_config
+from .core.labels import label_selectors, matches_target
 from .core.records import AnnotationRecord, FileGroup
 from .report.issues_json import summarize as summarize_issues
 from .report.issues_json import write_issues_csv, write_issues_json
-from .report.selection_output import write_selection_csv, write_selection_json
-from .selection.automatic import build_automatic_decisions, summarize_automatic
+from .report.selection_output import (
+    write_image_csv,
+    write_image_json,
+    write_selection_csv,
+    write_selection_json,
+)
+from .selection.automatic import (
+    build_automatic_decisions,
+    build_broken_decisions,
+    merge_automatic,
+    summarize_automatic,
+)
 from .selection.decisions import (
     Decision,
     HumanDecision,
@@ -28,6 +40,11 @@ from .selection.decisions import (
     build_decisions,
 )
 from .selection.decisions import summarize as summarize_decisions
+from .selection.image_decisions import (
+    assert_image_invariants,
+    build_image_decisions,
+    summarize_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument(
         "--review-decisions", type=Path, default=None, help="人間の判定JSON"
     )
+    select.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="check --only で作った部分的な issues.json でも採否を作る（既定は停止）",
+    )
 
     sub.add_parser("report", help="summary.md を書き出す")
+    sub.add_parser("gui", help="ブラウザで見るダッシュボードHTMLを書き出す")
 
     build = sub.add_parser(
         "build-dataset", help="採否マスタから development.json を生成する"
@@ -99,6 +122,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="uncertain の扱い",
     )
     build.add_argument("--version-tag", default=None, help="出力先のバージョン名")
+
+    review = sub.add_parser("review", help="FiftyOne での目視レビュー")
+    rsub = review.add_subparsers(dest="review_command", required=True)
+    rbuild = rsub.add_parser(
+        "build", help="アセットを書き出して FiftyOne dataset を作る"
+    )
+    rbuild.add_argument(
+        "--all",
+        dest="all_images",
+        action="store_true",
+        help="目視対象だけでなく全画像を書き出す（DICOM全画素読みで時間がかかる）",
+    )
+    rbuild.add_argument("--force", action="store_true", help="既存のアセットも作り直す")
+    rbuild.add_argument(
+        "--assets-only",
+        action="store_true",
+        help="アセットと manifest だけ作る（fiftyone を使わない）",
+    )
+    rbuild.add_argument(
+        "--discard-unexported",
+        action="store_true",
+        help="review export していない人間の判定を捨てて作り直す（既定は停止する）",
+    )
+    rsub.add_parser("launch", help="App を localhost で起動する")
+    rsub.add_parser("status", help="目視の進捗を表示する")
+    rsub.add_parser("export", help="判定を review_decisions.json へ書き出す")
+    rsub.add_parser("precision", help="自動ルールの Precision を集計する")
+    rimport = rsub.add_parser("import", help="review_decisions.json を FiftyOne へ戻す")
+    rimport.add_argument("--path", type=Path, default=None, help="読み込むJSON")
     return parser
 
 
@@ -124,7 +176,9 @@ def main(argv: list[str] | None = None) -> int:
         "check": _check,
         "select": _select,
         "report": _report,
+        "gui": _gui,
         "build-dataset": _build_dataset,
+        "review": _review,
     }
     handler = handlers.get(args.command)
     if handler is None:
@@ -231,6 +285,19 @@ def _check(config: Config, args: argparse.Namespace) -> int:
 
     out_dir = config.validation_dir / _fingerprint(config)
     meta = _meta(config, context)
+    # ★ --only / --skip で一部だけ回すと issues.json は部分結果になる。
+    # そのまま select すると「検出されなかった」と区別できず採否が壊れるので、
+    # 何を実行したかを成果物に刻む（select がこれを見て止める）。
+    executed = [check.CHECK_ID for check in checks]
+    meta["checks_executed"] = executed
+    meta["checks_partial"] = len(checks) < len(ALL_CHECKS)
+    if meta["checks_partial"]:
+        logger.warning(
+            "一部のチェックだけを実行した（%d/%d）。issues.json は部分結果なので "
+            "select は既定で停止する",
+            len(checks),
+            len(ALL_CHECKS),
+        )
     write_issues_json(out_dir / "issues.json", issues, config, meta)
     write_issues_csv(out_dir / "issues.csv", issues, config)
 
@@ -239,6 +306,36 @@ def _check(config: Config, args: argparse.Namespace) -> int:
     logger.info("  severity: %s", summary["by_severity"])
     logger.info("  status  : %s", summary["by_status"])
     return EXIT_ISSUES if summary["by_severity"].get("error") else EXIT_OK
+
+
+def _check_issues_complete(issues_path: Path, args: argparse.Namespace) -> bool:
+    """``issues.json`` が全チェックの結果か確かめる。
+
+    ``check --only M06,M07`` のように一部だけ回すと ``issues.json`` は上書きされて
+    部分結果になる。そのまま ``select`` すると**検出されなかったのか実行して
+    いないのかが区別できず**、pending が消えて採否が壊れる。
+    """
+    try:
+        meta = json.loads(issues_path.read_text(encoding="utf-8")).get("meta", {})
+    except (OSError, json.JSONDecodeError):
+        return True  # 読めなければ後段の読み込みでエラーになる
+    if not meta.get("checks_partial"):
+        return True
+    executed = meta.get("checks_executed") or []
+    if getattr(args, "allow_partial", False):
+        logger.warning(
+            "--allow-partial: 部分的な issues.json（%s）のまま採否を作る",
+            ",".join(executed),
+        )
+        return True
+    logger.error(
+        "issues.json は一部のチェックだけの結果（%s）。"
+        "このまま select すると未実行のチェックが「検出なし」になり採否が壊れる",
+        ",".join(executed),
+    )
+    logger.error("`segmentation-validation check` を（--only なしで）実行し直す")
+    logger.error("承知の上なら `select --allow-partial`")
+    return False
 
 
 def _select(config: Config, args: argparse.Namespace) -> int:
@@ -252,12 +349,22 @@ def _select(config: Config, args: argparse.Namespace) -> int:
         logger.error("issues.json が無い。先に check を実行する: %s", issues_path)
         return EXIT_FAILURE
 
+    if not _check_issues_complete(issues_path, args):
+        return EXIT_ISSUES
+
     issues = _read_issues(issues_path)
 
-    # 自動採否は D01（完全一致・同一ラベル）だけ。timestamp が新しい方を残す。
-    automatic, undecidable = build_automatic_decisions(
+    # 自動採否は2種類。
+    #   D01: 完全一致の重複 -> timestamp が新しい方を残す
+    #   M01-M05: 機械が確定的に「使えない」と判定した欠陥 -> exclude
+    # 両方に当たった場合は exclude を優先する（merge_automatic）。
+    duplicates, undecidable = build_automatic_decisions(
         context.records, context.pairs, config
     )
+    broken = build_broken_decisions(issues, config)
+    automatic = merge_automatic(duplicates, broken)
+    if broken:
+        logger.info("機械が確定した欠陥による自動exclude: %d 件", len(broken))
     auto_summary = summarize_automatic(automatic, undecidable)
     logger.info(
         "自動採否: exclude %d / keep %d（重複グループ %d）自動決定不能 %d",
@@ -268,29 +375,81 @@ def _select(config: Config, args: argparse.Namespace) -> int:
     )
 
     # 人間の判定。無ければ review 対象は pending のままになるだけで正しく動く。
-    human = _read_review_decisions(
-        args.review_decisions or out_dir / "review" / "review_decisions.json"
-    )
-    if human:
-        logger.info("人間の判定を読み込んだ: %d 件", len(human))
+    review_path = args.review_decisions or out_dir / "review" / "review_decisions.json"
+    human, human_images = _read_review_decisions(review_path)
+    if human or human_images:
+        logger.info(
+            "人間の判定を読み込んだ: annotation %d 件 / 画像 %d 件",
+            len(human),
+            len(human_images),
+        )
 
-    decisions = build_decisions(context.records, issues, config, automatic, human)
-    assert_invariants(decisions, list(context.records))
+    # 採否マスタは「全 annotation が1行」なので対象外も含める。
+    all_records = list(context.records) + list(context.out_of_scope)
+    decisions = build_decisions(
+        all_records,
+        issues,
+        config,
+        automatic,
+        human,
+        out_of_scope=frozenset(r.geometry_uid for r in context.out_of_scope),
+    )
+    assert_invariants(decisions, all_records)
+
+    # 画像単位の採否。annotation を持たない画像（正常例187 / 未アノテーション33）は
+    # selection_decisions に行を持てないので、別ファイルで採否を明示する。
+    image_decisions = build_image_decisions(
+        context.groups, issues, config, human_images
+    )
+    assert_image_invariants(image_decisions, list(context.groups))
 
     meta = _meta(config, context)
     write_selection_json(out_dir / "selection_decisions.json", decisions, meta)
     write_selection_csv(out_dir / "selection_decisions.csv", decisions)
+    write_image_json(out_dir / "image_decisions.json", image_decisions, meta)
+    write_image_csv(out_dir / "image_decisions.csv", image_decisions)
 
     summary = summarize_decisions(decisions)
-    logger.info("selection_decisions: %d 行 -> %s", summary["total"], out_dir)
+    c = summary["cases"]
+    logger.info(
+        "selection_decisions: %d 行 -> %s",
+        summary["total"],
+        out_dir,
+    )
+    logger.info(
+        "  規模      : 患者 %d / study %d / 画像 %d / annotation %d",
+        c["patients"],
+        c["studies"],
+        c["images"],
+        c["annotations"],
+    )
     logger.info("  採否      : %s", summary["by_decision"])
     logger.info("  理由      : %s", summary["by_reason"])
+    cp = summary["cases_pending"]
     logger.info(
-        "  review対象: %d / 未検証: %d",
+        "  review対象: %d annotation / 未検証: %d",
         summary["review_targets"],
         summary["unverified"],
     )
-    if summary["ready_to_build"]:
+    logger.info(
+        "  目視の実作業量: 患者 %d / study %d / 画像 %d"
+        "（annotation %d 件を含む画像を開く）",
+        cp["patients"],
+        cp["studies"],
+        cp["images"],
+        cp["annotations"],
+    )
+    images = summarize_images(image_decisions)
+    logger.info("image_decisions: %d 行（1画像=1行）", images["total"])
+    logger.info("  画像の分類: %s", images["by_class"])
+    logger.info("  画像の採否: %s", images["by_decision"])
+    if images["pending"]:
+        logger.warning(
+            "  画像 %d 枚が目視待ち（未アノテーションのビュー。側面像なら除外が必要）",
+            images["pending"],
+        )
+
+    if summary["ready_to_build"] and not images["pending"] and not images["uncertain"]:
         logger.info("  pending/uncertain なし。development.json を生成できる状態")
     else:
         logger.warning(
@@ -328,8 +487,43 @@ def _report(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _gui(config: Config, args: argparse.Namespace) -> int:
+    from .checks import ALL_CHECKS
+    from .report.gui import build_payload, write_dashboard
+
+    context = _load_context(config)
+    if context is None:
+        return EXIT_FAILURE
+    out_dir = config.validation_dir / _fingerprint(config)
+    if not (out_dir / "issues.json").exists():
+        logger.error("issues.json が無い。先に check を実行する")
+        return EXIT_FAILURE
+    decisions = _read_selection(out_dir / "selection_decisions.json")
+    if not decisions:
+        logger.error("selection_decisions.json が無い。先に select を実行する")
+        return EXIT_FAILURE
+
+    payload = build_payload(
+        config,
+        _read_issues(out_dir / "issues.json"),
+        decisions,
+        ALL_CHECKS,
+        dict(context.masks),
+        dict(context.files),
+        _fingerprint(config),
+        population=_population(context.groups),
+        image_decisions=_read_image_decisions(out_dir / "image_decisions.json"),
+    )
+    target = out_dir / "dashboard.html"
+    write_dashboard(target, payload, config)
+    size = target.stat().st_size / 1024
+    logger.info("dashboard.html (%.0f KB) -> %s", size, target)
+    logger.info("  ブラウザで開くか、Artifact として公開する")
+    return EXIT_OK
+
+
 def _build_dataset(config: Config, args: argparse.Namespace) -> int:
-    from .report.selection_output import read_selection_json
+    from .report.selection_output import read_image_json, read_selection_json
     from .report.summary_md import write_selection_summary
     from .selection.build_dataset import build_development_json
 
@@ -343,6 +537,32 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     by_uid = {row["geometry_uid"]: row["final_decision"] for row in rows}
     pending = sum(1 for v in by_uid.values() if v == "pending")
     uncertain = sum(1 for v in by_uid.values() if v == "uncertain")
+
+    # 画像単位の採否。annotation を持たない画像の扱いはこちらで決まる。
+    image_rows = read_image_json(out_dir / "image_decisions.json")
+    by_image = {row["file_uid"]: row["final_decision"] for row in image_rows}
+    img_pending = sum(1 for v in by_image.values() if v == "pending")
+    img_uncertain = sum(1 for v in by_image.values() if v == "uncertain")
+    if img_pending and not (args.allow_pending and args.pending_as):
+        logger.error(
+            "画像 %d 枚が目視待ち（未アノテーションのビュー）。"
+            "目視を進めるか `--allow-pending --pending-as keep|exclude` を明示すること",
+            img_pending,
+        )
+        return EXIT_ISSUES
+    if img_uncertain and not (args.allow_uncertain and args.uncertain_as):
+        logger.error("画像 %d 枚が uncertain のまま", img_uncertain)
+        return EXIT_ISSUES
+    # override 時は画像側にも同じ扱いを適用する。
+    if args.pending_as:
+        by_image = {
+            k: (args.pending_as if v == "pending" else v) for k, v in by_image.items()
+        }
+    if args.uncertain_as:
+        by_image = {
+            k: (args.uncertain_as if v == "uncertain" else v)
+            for k, v in by_image.items()
+        }
 
     # override は「許可」と「扱い」の両方を明示させる。
     # 片方だけでは通さない —— 保留が黙って入る／落ちるのを防ぐため。
@@ -377,14 +597,16 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
                 pending_as=args.pending_as,
                 uncertain_as=args.uncertain_as,
                 meta_extra={"fingerprint": _fingerprint(config)},
+                image_decisions=by_image,
             )
         )
         logger.info(
-            "%s: keep %d / exclude %d / 0件になったfile %d -> %s",
+            "%s: keep %d / exclude %d / 0件になったfile %d / 画像を落とした %d -> %s",
             dataset_id,
             results[-1].kept,
             results[-1].excluded,
             results[-1].files_emptied,
+            results[-1].images_dropped,
             target,
         )
 
@@ -400,15 +622,291 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
         overrides["pending_as"] = args.pending_as
     if args.uncertain_as:
         overrides["uncertain_as"] = args.uncertain_as
+    context = _load_context(config)
+    image_rows_full = _read_image_decisions(out_dir / "image_decisions.json")
     write_selection_summary(
         summary_path,
         config,
         decisions,
         issues,
+        image_decisions=image_rows_full,
         empty_files=sum(r.files_emptied for r in results),
-        meta={"fingerprint": _fingerprint(config), "overrides": overrides},
+        images_dropped=sum(r.images_dropped for r in results),
+        meta={
+            "fingerprint": _fingerprint(config),
+            "overrides": overrides,
+            "population": _population(context.groups) if context else {},
+        },
     )
     logger.info("selection_summary.md -> %s", summary_path)
+    return EXIT_OK
+
+
+def _review(config: Config, args: argparse.Namespace) -> int:
+    handlers = {
+        "build": _review_build,
+        "launch": _review_launch,
+        "status": _review_status,
+        "export": _review_export,
+        "precision": _review_precision,
+        "import": _review_import,
+    }
+    return handlers[args.review_command](config, args)
+
+
+def _review_dir(config: Config) -> Path:
+    return config.validation_dir / _fingerprint(config) / "review"
+
+
+def _check_unexported(config: Config, args: argparse.Namespace) -> bool:
+    """export していない人間の判定が DB に残っていないか確かめる。
+
+    ``review build`` は FiftyOne dataset を ``overwrite=True`` で作り直すので、
+    **``review export`` していない判定は黙って消える**。閾値を変えて再検出する
+    運用があるので、ここで止めないと目視の成果を失う。
+    """
+    review_dir = _review_dir(config)
+    manifest_path = review_dir / "review_manifest.json"
+    if not manifest_path.exists():
+        return True  # 初回。守るものが無い
+    try:
+        from .review.export_decisions import unexported_human_decisions
+    except ImportError:
+        return True  # fiftyone が無ければ dataset も無い
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    lost = unexported_human_decisions(
+        config, manifest, review_dir / "review_decisions.json"
+    )
+    if not lost:
+        return True
+
+    if args.discard_unexported:
+        logger.warning(
+            "--discard-unexported: export していない判定 %d 件を捨てて作り直す",
+            len(lost),
+        )
+        return True
+
+    logger.error(
+        "FiftyOne DB に review export していない人間の判定が %d 件ある。"
+        "review build は dataset を作り直すのでこれらは消える",
+        len(lost),
+    )
+    for row in lost[:10]:
+        logger.error("  %s %s -> %s", row["kind"], row["key"], row["decision"])
+    if len(lost) > 10:
+        logger.error("  ... 他 %d 件", len(lost) - 10)
+    logger.error("先に `segmentation-validation review export` を実行する")
+    logger.error("捨ててよいなら `review build --discard-unexported`")
+    return False
+
+
+def _review_build(config: Config, args: argparse.Namespace) -> int:
+    from .review.export_assets import export_assets, select_review_groups
+    from .review.manifest import build_manifest, write_manifest
+
+    context = _load_context(config)
+    if context is None:
+        return EXIT_FAILURE
+    out_dir = config.validation_dir / _fingerprint(config)
+    if not (out_dir / "selection_decisions.json").exists():
+        logger.error("selection_decisions.json が無い。先に select を実行する")
+        return EXIT_FAILURE
+
+    # ★ manifest を上書きする前に確認する。``review build`` は dataset を
+    # 作り直すので、export していない人間の判定は消える。
+    # ツール障害ではなく「ゲートで止めた」なので build-dataset と同じ exit 1。
+    if not _check_unexported(config, args):
+        return EXIT_ISSUES
+
+    issues = _read_issues(out_dir / "issues.json")
+    decisions = _read_selection(out_dir / "selection_decisions.json")
+    image_decisions = _read_image_decisions(out_dir / "image_decisions.json")
+
+    # 目視対象だけを書き出す。DICOMの全画素読みは1枚1〜3秒かかる。
+    pending_uids = {
+        d.geometry_uid for d in decisions if d.final_decision is Decision.PENDING
+    }
+    pending_images = {
+        d.file_uid for d in image_decisions if d.final_decision is Decision.PENDING
+    }
+    groups = select_review_groups(
+        context.groups, pending_uids, pending_images, include_all=args.all_images
+    )
+    logger.info(
+        "目視対象: annotation %d 件 / 画像 %d 枚 -> 書き出す画像 %d 枚%s",
+        len(pending_uids),
+        len(pending_images),
+        len(groups),
+        "（--all 指定）" if args.all_images else "",
+    )
+
+    adapters = {a.dataset_id: a.reference_mask_path for a in open_adapters(config)}
+    review_dir = _review_dir(config)
+    assets = export_assets(groups, config, review_dir, adapters, force=args.force)
+
+    manifest = build_manifest(
+        groups, assets, decisions, image_decisions, issues, config
+    )
+    write_manifest(review_dir / "review_manifest.json", manifest)
+    logger.info(
+        "review_manifest.json: 画像 %d / annotation %d"
+        "（目視待ち annotation %d / 画像 %d）",
+        manifest["meta"]["n_images"],
+        manifest["meta"]["n_annotations"],
+        manifest["meta"]["n_pending_annotations"],
+        manifest["meta"]["n_pending_images"],
+    )
+    if args.assets_only:
+        logger.info("--assets-only なので FiftyOne dataset は作らない")
+        return EXIT_OK
+
+    try:
+        from .review.fiftyone_builder import build_dataset
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+
+    build_dataset(manifest, config)
+    logger.info("次: `segmentation-validation review launch` で App を起動する")
+    return EXIT_OK
+
+
+def _review_launch(config: Config, args: argparse.Namespace) -> int:
+    try:
+        from .review.fiftyone_builder import launch_app
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+    launch_app(config)
+    return EXIT_OK
+
+
+def _review_status(config: Config, args: argparse.Namespace) -> int:
+    try:
+        from .review.fiftyone_builder import dataset_summary
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+
+    summary = dataset_summary(config)
+    if not summary:
+        logger.error(
+            "FiftyOne dataset '%s' が無い。`review build` を実行する",
+            config.review.dataset_name,
+        )
+        return EXIT_FAILURE
+    logger.info("dataset '%s'", summary["name"])
+    logger.info(
+        "  Sample %d / Detection %d", summary["n_samples"], summary["n_detections"]
+    )
+    logger.info("  annotation の判定: %s", summary["annotation_status"])
+    logger.info("  画像の判定      : %s", summary["image_status"])
+    auto = {k: v for k, v in summary["label_tags"].items() if k.startswith("auto:")}
+    logger.info("  auto: タグ      : %s", auto)
+    pending = summary["annotation_status"].get("pending", 0)
+    pending += summary["image_status"].get("pending", 0)
+    if pending:
+        logger.warning("  目視未完了 %d 件（pending = 0 が完了条件）", pending)
+    else:
+        logger.info("  目視完了")
+    return EXIT_OK
+
+
+def _review_export(config: Config, args: argparse.Namespace) -> int:
+    try:
+        from .review.export_decisions import collect_decisions, write_decisions
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+
+    from .review.manifest import read_manifest
+
+    manifest_path = _review_dir(config) / "review_manifest.json"
+    manifest = read_manifest(manifest_path) if manifest_path.exists() else None
+    if manifest is None:
+        logger.warning(
+            "review_manifest.json が無いので reviewer の有無だけで人間の判定を判別する"
+        )
+    try:
+        rows = collect_decisions(config, manifest)
+    except RuntimeError as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
+
+    target = _review_dir(config) / "review_decisions.json"
+    write_decisions(target, rows, config)
+    logger.info(
+        "review_decisions: annotation %d / 画像 %d -> %s",
+        sum(1 for r in rows if r["kind"] == "annotation"),
+        sum(1 for r in rows if r["kind"] == "image"),
+        target,
+    )
+    logger.info("次: `segmentation-validation select` で採否へ反映する")
+    return EXIT_OK
+
+
+def _review_precision(config: Config, args: argparse.Namespace) -> int:
+    """auto: × review: のクロス集計。fiftyone は使わない。"""
+    from .report.precision import (
+        compute_precision,
+        read_verdicts,
+        summarize,
+        write_precision,
+    )
+
+    out_dir = config.validation_dir / _fingerprint(config)
+    if not (out_dir / "issues.json").exists():
+        logger.error("issues.json が無い。先に check を実行する")
+        return EXIT_FAILURE
+
+    issues = _read_issues(out_dir / "issues.json")
+    verdicts = read_verdicts(_review_dir(config) / "review_decisions.json")
+    results = compute_precision(issues, verdicts, config)
+
+    target = out_dir / "precision.md"
+    write_precision(target, results, {"fingerprint": _fingerprint(config)})
+    stats = summarize(results)
+    logger.info(
+        "Precision: 検出 %d / 目視済 %d（exclude %d / keep %d / uncertain %d）-> %s",
+        stats["detected"],
+        stats["reviewed"],
+        stats["excluded"],
+        stats["kept"],
+        stats["uncertain"],
+        target,
+    )
+    for r in results:
+        if r.precision is not None:
+            logger.info(
+                "  %-36s 検出 %3d / 目視済 %3d -> Precision %.2f",
+                r.check_id,
+                r.detected,
+                r.reviewed,
+                r.precision,
+            )
+    if not stats["reviewed"]:
+        logger.warning("判定が1件も無いので Precision は計算できない")
+    return EXIT_OK
+
+
+def _review_import(config: Config, args: argparse.Namespace) -> int:
+    try:
+        from .review.import_decisions import import_decisions
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+
+    path = args.path or _review_dir(config) / "review_decisions.json"
+    if not path.exists():
+        logger.error("判定ファイルが無い: %s", path)
+        return EXIT_FAILURE
+    try:
+        import_decisions(path, config)
+    except RuntimeError as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
     return EXIT_OK
 
 
@@ -430,10 +928,30 @@ def _load_context(config: Config) -> CheckContext | None:
             groups.append(group)
             records.extend(group.records)
 
+    # 検証対象の絞り込み。既定は空 = 全病変。
+    keys, names = label_selectors(config.validation.target_labels)
+    in_scope = [r for r in records if matches_target(r.labels, keys, names)]
+    out_scope = [r for r in records if not matches_target(r.labels, keys, names)]
+    if out_scope:
+        logger.info(
+            "検証対象 %s -> 対象 %d / 対象外 %d annotation"
+            "（対象外はチェックを走らせない）",
+            config.validation.target_labels,
+            len(in_scope),
+            len(out_scope),
+        )
+
+    patients = {(r.dataset_id, r.patient_id) for r in records}
+    studies = {(r.dataset_id, r.study) for r in records}
+    annotated = {r.file_uid for r in records}
     logger.info(
-        "対象: %d データセット / %d ファイル / %d annotation",
+        "対象: %d データセット / 患者 %d / study %d / 画像 %d"
+        "（うち annotation あり %d） / annotation %d",
         len(adapters),
+        len(patients),
+        len(studies),
         len(groups),
+        len(annotated),
         len(records),
     )
     masks, files, pairs = _load_measurements(config)
@@ -446,7 +964,8 @@ def _load_context(config: Config) -> CheckContext | None:
         )
     return CheckContext(
         config=config,
-        records=tuple(records),
+        records=tuple(in_scope),
+        out_of_scope=tuple(out_scope),
         groups=tuple(groups),
         path_invariants=invariants,
         masks=masks,
@@ -495,11 +1014,24 @@ def _fingerprint(config: Config) -> str:
 
 
 def _meta(config: Config, context: CheckContext) -> dict[str, Any]:
+    records = tuple(context.records) + tuple(context.out_of_scope)
     return {
         "fingerprint": _fingerprint(config),
         "sources": [str(path) for path in config.dataset_sources()],
-        "n_annotations": len(context.records),
+        "n_annotations": len(records),
         "n_files": len(context.groups),
+        # annotation 数だけでは規模が伝わらないので症例単位も持つ。
+        "scale": {
+            "patients": len({(r.dataset_id, r.patient_id) for r in records}),
+            "studies": len({(r.dataset_id, r.study) for r in records}),
+            "series": len({(r.dataset_id, r.study, r.series) for r in records}),
+            "images": len({r.file_uid for r in records}),
+            "annotations": len(records),
+        },
+        # データセットには annotation を持たない画像も含まれる。
+        # そのうち大半は「正常例（No Findings）」で、意図的な陰性症例。
+        # 「アノテーション漏れ」と区別できるようにここで分類する。
+        "population": _population(context.groups),
         "decision_policy": {
             "cannot_determine_as_review_required": (
                 config.decision_policy.cannot_determine_as_review_required
@@ -545,6 +1077,55 @@ def _read_issues(path: Path) -> list[Issue]:
     return issues
 
 
+def _population(groups: tuple[FileGroup, ...]) -> dict[str, Any]:
+    """データセットに含まれる画像・study・患者の全体像。
+
+    ``scale`` は annotation を持つものしか数えない（採否マスタ由来）。
+    こちらは JSON に載っている全エントリを数えて、
+    annotation が無い画像の正体（正常例か未アノテーションか）まで分ける。
+    """
+    annotated = [g for g in groups if g.records]
+    negative = [g for g in groups if not g.records and g.is_negative_case]
+    unlabeled = [g for g in groups if not g.records and not g.is_negative_case]
+
+    def levels(subset: list[FileGroup]) -> dict[str, int]:
+        return {
+            "images": len(subset),
+            "studies": len({(g.dataset_id, g.study) for g in subset}),
+            "patients": len({(g.dataset_id, g.patient_id) for g in subset}),
+        }
+
+    return {
+        "total": levels(list(groups)),
+        "annotated": levels(annotated),
+        "negative": levels(negative),
+        "unannotated": levels(unlabeled),
+    }
+
+
+def _read_image_decisions(path: Path) -> list:
+    """``image_decisions.json`` を ImageDecision へ戻す。"""
+    import json
+
+    from .selection.decisions import DecisionSource, ReviewStatus
+    from .selection.image_decisions import ImageDecision
+
+    if not path.exists():
+        return []
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    result = []
+    for row in payload["decisions"]:
+        data = dict(row)
+        data["review_status"] = ReviewStatus(data["review_status"])
+        data["final_decision"] = Decision(data["final_decision"])
+        data["decision_source"] = DecisionSource(data["decision_source"])
+        for key in ("reviewer", "reviewed_at", "comment"):
+            if data.get(key) == "":
+                data[key] = None
+        result.append(ImageDecision(**data))
+    return result
+
+
 def _read_selection(path: Path) -> list:
     """``selection_decisions.json`` を SelectionDecision へ戻す。"""
     import json
@@ -576,29 +1157,41 @@ def _read_selection(path: Path) -> list:
     return result
 
 
-def _read_review_decisions(path: Path) -> dict[str, HumanDecision]:
+def _read_review_decisions(
+    path: Path,
+) -> tuple[dict[str, HumanDecision], dict[str, HumanDecision]]:
     """``review_decisions.json`` を読む。無ければ空。
 
     FiftyOne の DB を正本にしないので、人間の判定は必ずこのファイル経由で流す。
+    戻り値は ``(annotation単位, 画像単位)``。画像単位は annotation を持たない
+    画像（未アノテーションのビュー）の採否で、キーは ``file_uid``。
     """
     import json
 
     if not path.exists():
-        return {}
+        return {}, {}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    rows = payload["decisions"] if isinstance(payload, dict) else payload
-    result: dict[str, HumanDecision] = {}
-    for row in rows:
-        uid = row["geometry_uid"]
-        result[uid] = HumanDecision(
-            geometry_uid=uid,
-            decision=Decision(row["decision"]),
-            reason=row.get("reason") or "",
-            reviewer=row.get("reviewer"),
-            reviewed_at=row.get("reviewed_at"),
-            comment=row.get("comment"),
-        )
-    return result
+    if not isinstance(payload, dict):
+        payload = {"decisions": payload, "image_decisions": []}
+
+    def build(rows: list, key: str) -> dict[str, HumanDecision]:
+        result: dict[str, HumanDecision] = {}
+        for row in rows:
+            uid = row[key]
+            result[uid] = HumanDecision(
+                geometry_uid=uid,
+                decision=Decision(row["decision"]),
+                reason=row.get("reason") or "",
+                reviewer=row.get("reviewer"),
+                reviewed_at=row.get("reviewed_at"),
+                comment=row.get("comment"),
+            )
+        return result
+
+    return (
+        build(payload.get("decisions") or [], "geometry_uid"),
+        build(payload.get("image_decisions") or [], "file_uid"),
+    )
 
 
 def _split(value: str | None) -> list[str] | None:

@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 # 微小領域の閾値をクラス族ごとに変えるための対応表。
 # 対応する閾値は config.thresholds.small_by_class_mm2。
@@ -109,3 +109,35 @@ def parse_labels(raw_labels: list[dict[str, Any]]) -> tuple[Label, ...]:
 def label_keys(labels: tuple[Label, ...]) -> frozenset[tuple[str, str]]:
     """``(code_system, code)`` の集合。重複マスクの同一ラベル判定に使う。"""
     return frozenset(label.key for label in labels)
+
+
+def label_selectors(raw: Iterable[str]) -> tuple[frozenset[str], frozenset[str]]:
+    """設定の ``target_labels`` を照合用の2集合へ分解する。
+
+    ``"Findings/010"`` は ``(code_system, code)`` の正式な指定、
+    それ以外は ``code_text_eng`` として扱う。
+    """
+    keys, names = set(), set()
+    for token in raw:
+        token = token.strip()
+        if not token:
+            continue
+        (keys if "/" in token else names).add(token)
+    return frozenset(keys), frozenset(names)
+
+
+def matches_target(
+    labels: tuple[Label, ...], keys: frozenset[str], names: frozenset[str]
+) -> bool:
+    """このラベル群が検証対象に含まれるか。
+
+    どちらの集合も空なら全件が対象（絞り込み無し）。
+    複数ラベルを持つ annotation は、1つでも該当すれば対象に含める
+    —— 対象病変が写っている annotation を取りこぼさないため。
+    """
+    if not keys and not names:
+        return True
+    for label in labels:
+        if label.qualified_code in keys or label.code_text_eng in names:
+            return True
+    return False

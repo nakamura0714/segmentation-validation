@@ -113,6 +113,63 @@ Original Dataset JSON
 
 ---
 
+## 3.5 ★データセットの母集団（当初の報告が不正確だった点）
+
+`file_list` は **1083エントリ**あり、annotation を持つのは 863画像。
+当初この220枚を「annotation がゼロ」としか報告しておらず、
+**画像枚数を863として提示していたため規模が伝わらなかった**。実態は3種類:
+
+| 区分 | 画像 | study | 内容 |
+|---|---|---|---|
+| annotation あり | **863** | 857 | 検証対象 |
+| **正常例（No Findings）** | **187** | 187 | ★**187/187 が `No Findings/001 normal` を持ち DICOM も実在**。意図的な陰性症例で、開発データの陰性サンプルとして使える |
+| 未アノテーション | 33 | — | アノテーション済み study の2枚目以降（末尾 `_001`/`_002`）。分類ラベルも無い |
+| **合計** | **1083** | **1044** | 患者 982 |
+
+「検証すべきマスクが無い」のと「アノテーション漏れ」を区別できるよう、
+`FileGroup.case_labels`（study/series レベルの分類ラベル）と
+`FileGroup.is_negative_case` を持たせた。アダプタが従来これらの分類ラベルを
+件数だけ数えて捨てていたのが原因。
+
+レポートは**データセット全体を主に出し、annotation を持つ分を内訳として示す**。
+採否の数字は annotation を持つ分が母数であることを明記する。
+
+---
+
+## 3.6 ★画像単位の採否（annotation 単位では表せないもの）
+
+`selection_decisions` は annotation 単位なので、**annotation を持たない画像は1行も持てない**。
+しかし判断は必要:
+
+- **正常例（No Findings）187枚** → keep（陰性サンプル）
+- **未アノテーションのビュー33枚** → **pending**。側面像なら開発データから除外が必要
+
+そこで `image_decisions.csv`（**1画像 = 1行**、1083行）を新設した。
+annotation 単位の不変条件（1817行）を壊さずに画像の採否を明示できる。
+
+新チェック `M09_UNANNOTATED_VIEW` は **annotation ではなく画像**について報告する
+（`geometry_uid` は None）。`CheckContext.file_issue()` を追加。
+
+`build-dataset` は両方を見る。**画像が exclude なら file entry ごと落とす** ——
+「annotation が0件になっても file entry は残す」規則とは別で、
+画像を落とすという明示的な判断があったときだけ母集団を変える。
+
+### M01-M05 を自動 exclude に変更
+
+当初 `review_required` にしていたが、**目視の余地が無い**ため誤りだった。
+特に `M05_FILE_MISSING` は画像もマスクも存在しないので **FiftyOne に表示できない**。
+「自動採否は D01 のみ」という方針は*判断を要するもの*（重複・微小領域）についての話で、
+*客観的に壊れているファイル*の話ではなかった。
+
+条件は **severity=ERROR かつ status=checked** のみ。
+これにより original マスクの INFO（RGBAは仕様上正常）と判定不能を巻き込まない。
+D01 の keep と衝突したら **exclude を優先**する（`merge_automatic`）。
+
+実データでは M01-M05 が全て0件なので現在の数字は変わらない。
+合成データ8ケースで挙動を検証した。
+
+---
+
 ## 4. アーキテクチャ
 
 維持する設計思想:
@@ -249,6 +306,62 @@ labels, raw_label_ids
 
 主キー = `geometry_uid`（全域一意を確認済み）。dataset跨ぎを想定して `(dataset_id, geometry_uid)` でも識別できる形を保持。
 `file_uid` は **`source_json` を含める**（1件のfile_idが2JSONに跨るため。含めないと偽の重複ペアが出る）。
+
+---
+
+## 6.5 ★検証対象の病変（当初の計画に抜けていた判断）
+
+元の要望で「気胸」が出てくるのは **S03 の閾値決定の根拠**としてのみで
+（「微小領域の閾値は恣意的に設定せず、気胸のマスク面積分布を確認した上で決定する」）、
+**検証対象を絞る指定ではなかった**。計画はこれを「クラス族ごとの閾値」で処理したが、
+そもそも非気胸を検証すべきかという判断を書いていなかった。
+
+実測（brush annotation のラベル構成）:
+
+| データセット | brush | 気胸 | 気胸率 | 主な非気胸 |
+|---|---|---|---|---|
+| ANN_EIRLPRJ_01272 | 491 | 320 | 65.2% | 間質性陰影71 / ブラ34 / 胸水24 |
+| ANN_EIRLPRJ_1298 | 898 | 319 | **35.5%** | 間質性陰影209 / 胸水131 / 結節98 |
+| ETR_..._mask136 | 276 | 276 | **100%** | — |
+| **合計** | **1665** | **915** | **55.0%** | |
+
+**mask136 だけが気胸専用**で、他2つは混在している。
+現在の pending 251件のうち**気胸は102件だけで、149件（59%）が非気胸**。
+
+### 決定: config で切り替え、既定は全病変
+
+```jsonc
+"validation": {
+  // 空なら全病変を検証（既定）。絞るなら列挙する。
+  // 同一性は (code_system, code) なので "Findings/010" が正式。
+  // "pneumothorax"（code_text_eng）でも指定できる。
+  // code_text は表記揺れがあるので受け付けない
+  // （Findings/010 に「気胸（塗りつぶし）」と「気胸（縁取り）」が混在する）。
+  "target_labels": []
+}
+```
+
+- **対象内は全件検証する**（部分的に検証しない）
+- **対象外はチェックを一切走らせず**、採否マスタに `reason = out_of_scope` として1行残す。
+  `no_issue_detected`（検証して問題なし）と混ぜない
+- 対象外も `keep` のまま。開発データから落とすかは属性定義が固まってから決める
+
+実装は **`CheckContext` の構築時に対象内/対象外を分ける**。こうすると15個のチェックを
+1つも触らずに全てがスコープに従い、ペア系も「片側でも対象内なら報告」という正しい挙動になる
+（`_emit` が `by_uid` に無い側を飛ばすため）。
+
+気胸のみに絞った場合の実測:
+
+```
+対象 915 / 対象外 902 annotation
+pending 251 -> 102 、目視する画像 177枚 -> 87枚
+out_of_scope 902 件を採否マスタに明示
+```
+
+★**bbox / elliptical 152件に気胸ラベルは1件も無い**（fracture 42 / 縦隔拡大 14 / other 82 等）。
+そのため気胸のみモードでは、座標が壊れている11件（degenerate 7 / 範囲外 4）も全て対象外になる。
+気胸専用の開発データには無関係なので筋は通っているが、
+**全病変モードでしか M07 の異常は拾えない**ことは意識しておく。
 
 ---
 
@@ -1069,6 +1182,122 @@ config で外出しするもの: **対象JSONパス（リスト or glob）**、`
 | **13** | Development Dataset JSON builder + `selection_summary.md` + pending/uncertain のゲート |
 
 Phase 9 まででレビュー用の材料は全部揃うので、**FiftyOne が使えなくても検証結果は成立する**。
+
+---
+
+## 20.5 ★Phase 10-12 実装後の実測（FiftyOne）
+
+| 項目 | 実測 |
+|---|---|
+| 環境 | fiftyone 1.21.0 / mongod 起動成功（`$HOME/.fiftyone/var/lib/mongo`、ext4）|
+| cv2 provider | `opencv-python-headless` **1種類のみ**（衝突は起きなかった）|
+| アセット書き出し | 210画像 / 473マスク / 150バンド / **397MB** / **8分46秒**（2回目は45秒）|
+| dataset | 210 Sample / **521 Detection** |
+| 目視待ち | annotation **251** / 画像 **33**（採否マスタと完全一致）|
+| 往復テスト | **成功**。DB削除→再構築→import で annotation 3件・画像2件の判定が完全復元、`auto:` タグ12種も保持 |
+| fiftyone の隔離 | AST で静的検査。`review/` の3モジュールのみ（違反0）|
+
+**★実装中に見つけた不具合**
+
+1. **マスクを持たない bbox 11件が目視対象から漏れていた。**
+   `path_mask` が無いと `asset.boxes` に入らず manifest から落ちる。
+   ところがこの11件は M07（座標が壊れている）で、**座標そのものが目視対象**。
+   JSONの `min_x/min_y/max_x/max_y` から枠を出すようにした。
+   退化した bbox は表示できる最小サイズまで広げ、`original_bbox` に原座標を残す。
+   → 目視待ちが 240 → **251** になり採否マスタと一致した。
+2. **保存ビューが1つしか作られていなかった。**
+   FiftyOne はビュー名を slug 化するので、**日本語だけの名前は空 slug で `ValueError`**。
+   `① 目視待ちの annotation` だけ通っていたのは "annotation" が残ったから。
+   ASCII 名 + 日本語の description に変更。例外を debug ログに落としていたのも警告に上げた。
+3. **`review export` が機械の判定まで人間の判定として書き出していた。**
+   dataset には目視対象の周辺 annotation も文脈として載っており、
+   D01 の自動 exclude や既定の keep を持つ。全部書き出すと `select` で
+   `decision_source=human` になり、`assert_invariants`（human なら reviewer 必須）で落ちた。
+   **manifest を基準線にして変化した分だけ**を人間の判定とする方式に変更
+   （reviewer の入力漏れに強い）。273件 → **3件**（実際に入力した数）。
+4. **`select` が画像単位の人間の判定を読んでいなかった。**
+   `review_decisions.json` の `image_decisions` を無視していたので、
+   側面像と判定しても画像の採否に反映されなかった。
+
+---
+
+## 20.6 ★README通り1周した際に見つけた性能上の不具合（2026-09-04）
+
+**OpenCV の内部スレッドが `--jobs` と掛け算になっていた。**
+
+走査はファイル単位で `ThreadPoolExecutor(--jobs)` に並列化しているが、
+OpenCV は既定でマシンの全コアぶんのスレッドプールを使う。
+このサーバーは **256コア**なので、`connectedComponents` / `distanceTransform` の
+呼び出しごとに `--jobs 8` × 数十本が立ち上がる。
+
+実測（他ユーザーの学習ジョブが走っている状態で）:
+
+| | スレッド数 | CPU | load average | 走査の進み |
+|---|---|---|---|---|
+| 修正前 | **454** | 1428% | **143** | ~2件/分（1083件で数十分） |
+| 修正後 | 199（大半は import 時の待機プール） | 515% | 37 | **7〜8件/秒 → 全1083件 2分35秒** |
+
+単体で確認した機序:
+
+```
+cv2 の既定スレッド数 = 256（nproc と同じ）
+connectedComponents + distanceTransform を2回呼ぶだけで OSスレッド 446本
+cv2.setNumThreads(1) 後に8並列で同じ処理 → 191本（呼び出しでは増えない）
+```
+
+対処: `core/cpu.py` の `limit_native_threads()` を追加し、
+`measure.scan()` と `review.export_assets()` の入口で `cv2.setNumThreads(1)` を呼ぶ。
+**並列度は `--jobs` 側だけで担保する**という不変条件にした。
+
+> 上表の速度差には他ユーザーのジョブ終了による負荷低下も混じっているため、
+> 30倍という倍率そのものは修正の効果とは言い切れない。
+> ただし「256スレッド × jobs」という機序と、それが共有サーバーの
+> 他ジョブまで巻き込むことは単体測定で確認済み。
+
+## 20.7 ★README通り1周した際に見つけた成果物の欠陥（2026-09-04）
+
+いずれも「手順どおり操作すると成果物が黙って壊れる」もの。ゲートを追加した。
+
+### 1. `review build` が export していない目視結果を消していた
+
+`build_dataset()` は `fo.Dataset(name, overwrite=True)` で dataset を作り直し、
+`review_status` を manifest（= `selection_decisions` の機械の採否）で塗り直す。
+つまり **`review export` していない判定は消える**。
+実際に往復テストで入れた annotation 3件・画像2件の判定が消えた。
+
+「`auto:` は貼り直し、人間の判定は保持」という方針が成立するのは
+**`review export` 済みである場合だけ**で、そこが手順にも実装にも書かれていなかった。
+閾値を変えて再検出する運用があるので、目視の成果を失う事故になり得る。
+
+対処: `review/export_decisions.py` に `unexported_human_decisions()` を追加し、
+**manifest を上書きする前**に DB と `review_decisions.json` を突き合わせる。
+差があれば `review build` を **exit 1 で停止**する（`--discard-unexported` で強行）。
+基準線には**作り直す前のディスク上の manifest** を使う —— 新しい manifest を
+基準にすると「変化なし」に見えて検出できない。
+
+### 2. `check --only` の部分結果で `select` が採否を壊していた
+
+`issues.json` は毎回上書きされるので、`check --only M06,M07` の後に `select` すると
+**未実行のチェックが「検出なし」と区別できない**。実測の被害:
+
+```
+正しい採否   keep 1465 / pending 251 / exclude 101
+部分結果から keep 1705 / pending  11 / exclude 101   ← 240件の目視対象が消える
+```
+
+対処: `issues.json` の meta に `checks_executed` / `checks_partial` を刻み、
+`select` は部分結果を見たら **exit 1 で停止**する（`--allow-partial` で強行）。
+
+### 3. `selection_summary.md` が override 時に落とした画像枚数を過少報告していた
+
+「画像そのものを落とした枚数」を `image_decisions` の `exclude` 数だけで出していた。
+`--pending-as exclude` を使うと pending の画像も落ちるので、
+**実際に32枚落としているのに 1 と表示**していた。
+`selection_summary.md` は「これを出荷してよいか」を判断する文書なので致命的。
+
+あわせて、override で生成した場合の末尾の判定が `[BLOCKED] ... 生成してよいか: no`
+のままで、**生成物が既に存在することが読み取れなかった**。
+`[OVERRIDE]` に分け、目視未完了の状態のものであると明記するようにした。
 
 ---
 

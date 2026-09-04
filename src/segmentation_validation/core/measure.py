@@ -27,6 +27,7 @@ from ..config import Config
 from ..datasets.pi6 import outside_body as pi6_outside_body
 from ..datasets.pi6.references import ReferenceSet, ReferenceStatus, load_references
 from .cache import MeasurementCache
+from .cpu import limit_native_threads
 from .geometry import (
     MaskStats,
     containment,
@@ -295,6 +296,8 @@ def scan(
         len(groups),
         jobs,
     )
+    # OpenCV の内部スレッドと jobs が掛け算になるのを防ぐ（core/cpu.py 参照）。
+    limit_native_threads(jobs)
     progress = Progress(len(pending), label="走査")
     resolvers = reference_paths or {}
     scanned = 0

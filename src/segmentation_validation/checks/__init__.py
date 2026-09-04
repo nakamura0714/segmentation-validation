@@ -31,6 +31,7 @@ from .machine import (
     m06_path_format,
     m07_bbox_geometry,
     m08_json_consistency,
+    m09_unannotated_view,
 )
 from .suspicious import s03_tiny_region, s04_original_final, s05_outside_body
 
@@ -44,6 +45,7 @@ MACHINE_CHECKS: tuple[Check, ...] = (
     m06_path_format,
     m07_bbox_geometry,
     m08_json_consistency,
+    m09_unannotated_view,
 )
 
 # ② 重複アノテーション（形 × ラベルの2軸）

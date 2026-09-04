@@ -143,12 +143,30 @@ class FileGroup:
     spacing: tuple[float | None, float | None]
     manufacturer: str | None
     records: tuple[AnnotationRecord, ...]
+    # study / series レベルの分類ラベル（geometry ではない）。
+    # annotation を持たない画像が「正常例」か「単に未アノテーション」かは
+    # これでしか判別できない。実測では未アノテーション187 study の全てが
+    # ``No Findings/001 normal`` を持っており、意図的な陰性症例だった。
+    case_labels: tuple[Label, ...] = ()
 
     @property
     def file_uid(self) -> str:
         return (
             f"{self.source_json}::{self.institution}"
             f"/{self.study}/{self.series}/{self.file}"
+        )
+
+    @property
+    def is_negative_case(self) -> bool:
+        """アノテーションが無く、正常例として明示されているか。
+
+        「検証すべき対象が無い」のと「アノテーション漏れ」を区別する。
+        """
+        if self.records:
+            return False
+        return any(
+            label.code_system == "No Findings" or label.code_text_eng == "normal"
+            for label in self.case_labels
         )
 
     @property

@@ -14,9 +14,19 @@ from .decisions import (
     build_decisions,
     summarize,
 )
+from .image_decisions import (
+    ImageDecision,
+    assert_image_invariants,
+    build_image_decisions,
+    summarize_images,
+)
 
 __all__ = [
     "AutomaticDecision",
+    "ImageDecision",
+    "assert_image_invariants",
+    "build_image_decisions",
+    "summarize_images",
     "Decision",
     "DecisionSource",
     "HumanDecision",

@@ -1,0 +1,1057 @@
+# ChestMetry PI6 セグメンテーションデータセット バリデーション
+
+PI6 のセグメンテーションデータセットについて
+
+1. 機械的に判定できる不整合を検出し
+2. 判断できないものを FiftyOne で目視レビューし
+3. **元JSONを変更せずに**開発用データセット JSON を生成する
+
+ためのツール。
+
+**このREADMEを上から順に実行すれば1周できる。** 数値は 2026-09-04 時点の実測値。
+閾値・ポリシーを変えたら数値は変わる。
+
+---
+
+## 目次
+
+- [0. 5分で全体像](#0-5分で全体像)
+- [1. 用語 — これだけ押さえれば読める](#1-用語--これだけ押さえれば読める)
+- [2. 環境構築](#2-環境構築)
+- [3. 手順 — 上から順に実行する](#3-手順--上から順に実行する)
+- [4. 成果物の読み方](#4-成果物の読み方)
+- [5. バリデーション項目一覧](#5-バリデーション項目一覧)
+- [6. データの中身](#6-データの中身)
+- [7. 設定](#7-設定)
+- [8. 困ったとき](#8-困ったとき)
+- [9. 設計上の約束](#9-設計上の約束)
+
+---
+
+## 0. 5分で全体像
+
+```
+元JSON 3本（1083画像 / 1817 annotation）
+   │
+   │  scan     … 画素を1度だけ読んで計測値をキャッシュ（約2分）
+   │  check    … 各チェックを実行 → issues.json
+   │  select   … 全 annotation の採否を確定 → selection_decisions.csv
+   ▼
+  keep    1465 ┐
+  exclude  101 ├ 機械が決めた分
+  pending  251 ┘ ← 人が見ないと決まらない分
+   │
+   │  review build   … 目視用の画像を書き出して FiftyOne に載せる
+   │  review launch  … App を開いて目視、判定を入力
+   │  review export  … 判定を review_decisions.json へ
+   │  select         … 採否へ反映（pending が減る）
+   ▼
+  pending 0 になったら
+   │
+   │  build-dataset  … keep だけを残した development.json
+   ▼
+  開発用データセット
+```
+
+**pending = 0 が目視完了の条件。** それまで `build-dataset` は既定で止まる。
+
+---
+
+## 1. 用語 — これだけ押さえれば読める
+
+### 1.1 チェックの3系統
+
+| 系統 | 何を見るか | たとえば |
+|---|---|---|
+| **M系**（M01–M09） | **機械的な整合性。** ファイルが読めるか、マスクの形式が規定どおりか、JSONの宣言値と実データが合っているか | マスクの解像度が DICOM と違う / ファイルが無い / 空マスク |
+| **D系**（D01–D04） | **重複アノテーション。** 同じ画像の中に同じ領域が二重に登録されていないか | 別の人が同じ場所を塗り直して2件になっている |
+| **S系**（S03–S05） | **医学的・形状的に疑わしいもの。** 人が画像を見ないと妥当性を判断できないもの | 面積が小さすぎる / 体外にはみ出している |
+
+> S01・S02 は欠番。旧設計の S01（重複マスク）は D01–D04 に分割し、S02（label_id重複）は
+> 削除した（`label_id` は全域で一意で、ラベルメタデータの重複はマスク品質の問題ではないため）。
+
+### 1.2 Issue と SelectionDecision — 最重要
+
+**ここを混同すると全部読めなくなる。**
+
+| | Issue | SelectionDecision |
+|---|---|---|
+| 答える問い | **プログラムが何に気づいたか** | **最終的に開発データに使うか** |
+| ファイル | `issues.csv` | `selection_decisions.csv` |
+| 行の粒度 | 1 annotation に複数行あり得る | **必ず 1 annotation = 1行** |
+
+**Issue があること ≠ 除外。**
+
+微小領域として検出された annotation を目視して「医学的に妥当な小さい病変だ」と判断したら:
+
+```
+issues.csv              : S03_TINY_ANNOTATION が1行     ← 検出した事実は消えない
+selection_decisions.csv : final_decision = keep         ← 開発データには使う
+                          reason = visually_valid
+                          decision_source = human
+```
+
+検出の記録が消えないので、後から「**この自動ルールは何割が本当に不正だったか**」
+（Precision）を計算できる。これがルール改善の根拠になる。
+
+### 1.3 採否の4状態（`final_decision`）
+
+| 値 | 意味 | 開発データに入るか |
+|---|---|---|
+| `keep` | 使う | 入る |
+| `exclude` | 使わない | 入らない |
+| `pending` | **まだ人が見ていない。目視待ち** | 未確定（`build-dataset` が止まる） |
+| `uncertain` | 見たが判断できなかった（要相談） | 未確定（同上） |
+
+### 1.4 誰が決めたか（`decision_source`）
+
+| 値 | 意味 |
+|---|---|
+| `automatic` | 機械が確定させた（完全一致の重複、明確に壊れたマスク） |
+| `human` | FiftyOne で人が判断した |
+| `default` | 誰も判断していない。Issue が無い、または検査できなかった |
+| `-` | 未決定（`pending`） |
+
+### 1.5 なぜその採否になったか（`reason`）
+
+| 値 | 意味 | 現在 |
+|---|---|---|
+| `no_issue_detected` | 全チェックを通って問題なし | 984 |
+| **`kept_without_full_check`** | **一部のチェックが実行できないまま keep した** | 481 |
+| `review_required` | 目視が必要なので `pending` にした | 251 |
+| `older_exact_duplicate` | 完全一致の重複のうち古い方（自動 exclude） | 101 |
+| `broken_mask` | 機械が確定的に「使えない」と判定（自動 exclude） | 0 |
+| `out_of_scope` | 検証対象ラベルの外（既定は全病変なので0） | 0 |
+| `visually_valid` / `invalid_annotation` 等 | 人が見て判断した（自由記述） | 0（目視前） |
+
+#### `cannot_determine` なのに `keep` なのはなぜか
+
+体外領域チェック（S05）には胸郭の参照マスクが必要だが、参照マスクは全体の約3割で
+整備されていない（`01272` は 0/296 ファイル）。取れる選択肢は3つ:
+
+1. 黙って keep にする → **禁止。**「問題なし」と「未検査」が区別できなくなる
+2. 全部 pending にして目視する → 509件の工数が乗る
+3. **keep にするが「未検証」と明記する** ← 現在の方針
+
+なので該当する annotation は `reason = kept_without_full_check`、
+`unverified_checks = S05_REFERENCE_UNAVAILABLE` と記録される。
+つまり **「検査して問題なかった」のではなく「検査できなかった」** ことが CSV 上で分かる。
+
+`unverified_checks != none` で絞れば **後から目視に回すのは1コマンド**（[7章](#7-設定)）。
+現在 `unverified_checks != none` は509件で、うち481件が `kept_without_full_check`。
+差の28件は判定不能に加えて目視が必要な Issue も持つため `pending` が優先されている。
+
+### 1.6 成果物いちらん
+
+| ファイル | 答える問い | 行 |
+|---|---|---|
+| `issues.json` / `.csv` | プログラムが何を検出したか | 1364（annotation 単位 1144 + 画像単位 220） |
+| **`selection_decisions.json` / `.csv`** | **annotation を開発データに使うか（採否の正本）** | **1817（必ず1 annotation=1行）** |
+| **`image_decisions.json` / `.csv`** | **その画像を開発データに含めるか** | **1083（必ず1画像=1行）** |
+| `review_decisions.json` / `.csv` | 人が何と判断したか | 目視した分だけ |
+| `summary.md` | 検出件数・判定不能の理由・参照マスクのカバレッジ・施設別/アノテータ別の偏り | — |
+| `selection_summary.md` | **開発データを作ってよい状態か** | — |
+| `precision.md` | 自動ルールのうち何割が本当に不正だったか | check ごと |
+| `dashboard.html` | 以上をブラウザで辿る | — |
+| `development.json` | keep だけを反映した開発用データ | 元JSONと同一スキーマ |
+
+出力先は `output/validation/<fingerprint>/` と `output/development/<dataset>/<version>/`。
+`<fingerprint>` は対象JSONのサイズ・mtime・sha256 から作る
+（`version_id` は3本とも `2.2` なので、それ単独ではキーにできない）。
+
+---
+
+## 2. 環境構築
+
+```bash
+cd /mnt/project/chest/metry/pi6/work/nakamura/segmentation-validation
+
+# 検証本体だけ（16パッケージ）
+uv sync
+```
+
+これだけで `scan` / `check` / `select` / `report` / `gui` / `build-dataset` が動く。
+
+### 目視レビューまでやる場合
+
+```bash
+uv sync --group review
+```
+
+**122パッケージ**（16 + 106）+ mongod（Linux はホイールが無く、インストール時に
+`fastdl.mongodb.org` から 86MB をダウンロードする）。
+`uv sync`（`--group review` なし）に戻すと 106個がアンインストールされるので、
+目視レビューを続ける間は `--group review` を付けたままにする。
+
+**mongod のデータ置き場はローカルディスクにすること。** NFS 上（`/mnt` 配下）だと壊れる。
+
+```bash
+findmnt -T "$HOME" -o TARGET,SOURCE,FSTYPE
+#   FSTYPE が ext4 / xfs などならOK。nfs なら別のローカルディスクを指定する
+
+export FIFTYONE_DATABASE_DIR="$HOME/.fiftyone/var/lib/mongo"
+#   毎回打つのが面倒なら ~/.bashrc に書く。config の review.database_dir でも指定できる
+```
+
+### 環境の確認
+
+```bash
+# cv2 が1種類だけか（opencv-python と headless が共存すると壊れる）
+uv run python -c "import importlib.metadata as m, cv2; \
+  print(cv2.__version__, [d.metadata['Name'] for d in m.distributions() \
+  if d.metadata['Name'] and 'opencv' in d.metadata['Name'].lower()])"
+#   -> 4.14.0 ['opencv-python-headless']
+
+# fiftyone が無くても検証本体が動くか
+uv run python tests/test_no_fiftyone.py
+#   -> ALL OK: fiftyone が無くても検証本体は動く
+```
+
+---
+
+## 3. 手順 — 上から順に実行する
+
+### 3.1 対象を確認する
+
+```bash
+uv run segmentation-validation list-sources   # 対象JSON 3本
+uv run segmentation-validation list-checks    # 登録チェック一覧
+uv run segmentation-validation show-config    # 解決後の設定
+```
+
+### 3.2 走査（画素を読む）
+
+```bash
+uv run segmentation-validation scan --jobs 8
+```
+
+- 1665枚のマスクと1083件のDICOMヘッダを**1度だけ**読んで計測値をキャッシュする
+  （マスク 3233行 = 修正後1665 + 修正前1568 / ペア 1446行）
+- **2〜3分**（`--jobs 8`。実測 1分53秒〜2分35秒）。キャッシュは 6.9MB。
+  2回目以降は走査済みを飛ばして**1秒未満**で終わる
+- 途中で中断しても再開できる（`--force` で作り直し、`--limit 20` でスモークテスト）
+
+> 所要時間は**データが乗っている NFS の混み具合で大きくぶれる**。共有サーバーなので
+> `cat /proc/loadavg` と `uptime` を見て、他の人の学習ジョブが張り付いていないか
+> 確認してから流すこと。
+
+### 3.3 チェックを実行する
+
+```bash
+uv run segmentation-validation check
+```
+
+→ `issues.json` / `issues.csv`（1364行 = annotation 単位 1144 + 画像単位 220）。
+数秒で終わる。**error があると exit 1** を返す（夜間バッチ用）。
+
+パス規約や bbox の閾値を詰めているときは、JSONだけで判定できるチェックを1秒で回せる:
+
+```bash
+uv run segmentation-validation check --only M06,M07
+```
+
+> **`--only` / `--skip` を使ったら、`select` の前に `--only` なしで回し直すこと。**
+> `issues.json` は毎回上書きされるので、部分実行した結果のまま `select` すると
+> 未実行のチェックが「検出なし」と区別できず**採否が壊れる**
+> （実測: pending 251 → 11、keep 1465 → 1705 になる）。
+> このため成果物に「何を実行したか」を刻んであり、**`select` は部分結果を見ると停止する**。
+> 承知の上で進めるなら `select --allow-partial`。
+
+### 3.4 採否を確定する
+
+```bash
+uv run segmentation-validation select
+```
+
+→ `selection_decisions.csv`（1817行）と `image_decisions.csv`（1083行）。
+
+初回は `review_decisions.json` が無いので、目視対象は `pending` のままになる。それが正しい。
+
+### 3.5 結果を見る
+
+```bash
+uv run segmentation-validation report   # → summary.md
+uv run segmentation-validation gui      # → dashboard.html（単一HTML・807KB）
+```
+
+`summary.md` に出るもの: 検出件数 / 判定不能の理由の内訳 / **参照マスクのカバレッジ（毎回実測）** /
+施設別の検出件数 / **体外領域のアノテータ別の偏り**。
+
+`dashboard.html` はブラウザで開く。JSON/CSV より速く全体が掴める。
+含まれるもの: 採否の流れ（症例数つき）/ 症例単位の合格数 / check 別の pending
+（annotation 数と画像枚数の両方）/ **面積分布と閾値** / 体外領域の裾50点 /
+M・D・S 系統ごとに開閉できる check 台帳 / annotation の絞り込み / 用語解説。
+外部依存は Google Fonts のみ（面積分布などのグラフはここにしか出ない）。
+
+### 3.6 FiftyOne で目視する
+
+```bash
+export FIFTYONE_DATABASE_DIR="$HOME/.fiftyone/var/lib/mongo"
+
+uv run segmentation-validation review build
+```
+
+- 目視対象の画像を PNG に変換し、マスクを bbox で切り出して FiftyOne dataset を作る
+- **初回は6〜9分**（実測 6分29秒 / 8分46秒）。210 Sample / 521 Detection /
+  画像210・マスク473・バンド150 で **397MB**。DICOM の全画素読みが1枚1〜3秒
+- 2回目以降は既存アセットを飛ばして**約1分**（実測 54秒）
+- 全1083枚を載せたいときは `--all`
+
+> ★**`review build` の前に必ず `review export` する。**
+> `review build` は FiftyOne dataset を作り直すので、**export していない判定は消える**。
+> 判定の正本は `review_decisions.json` であって DB ではない。
+> 消える判定があるときは**停止する**ので、指示どおり `review export` してから
+> やり直せばよい（捨ててよいなら `review build --discard-unexported`）。
+
+```bash
+uv run segmentation-validation review launch
+```
+
+App が本サーバーの `localhost:5151` で起動する。**インターネットへ公開しない。**
+手元の端末から SSH トンネルで見る:
+
+```bash
+# 踏み台を経由する場合
+ssh -L 5151:localhost:5151 <踏み台> -t ssh -L 5151:localhost:5151 <本サーバー>
+
+# ~/.ssh/config に ProxyJump を書いておくなら
+#   Host pi6
+#     HostName <本サーバー>
+#     ProxyJump <踏み台>
+ssh -L 5151:localhost:5151 pi6
+```
+
+ブラウザで `http://localhost:5151` を開く。
+
+### 3.7 App での目視のやりかた
+
+左サイドバーの保存ビューから入る。**名前に ASCII を含めているのは、FiftyOne が
+ビュー名を slug 化するため**（日本語だけの名前は空 slug になって作成に失敗する）。
+
+| ビュー | 何を見るか |
+|---|---|
+| `1-pending-annotations` | 目視待ちの annotation（251件） |
+| `2-pending-images` | 目視待ちの画像（33枚）。**側面像なら除外** |
+| `3-outside-body` | 体外領域（50件） |
+| `4-tiny-region` | 微小領域。**ここでの判定が S03 の閾値を決める** |
+| `5-contained-different-label` | 包含された重複（別ラベル）。入れ子の所見の可能性 |
+| `6-broken-bbox` | 座標が壊れている bbox。`original_bbox` に原座標 |
+
+判定は次の3つを入力する。
+
+| 入力先 | フィールド | 値 |
+|---|---|---|
+| **annotation の良否** | Detection（Label）の `review_status` | `keep` / `exclude` / `uncertain` |
+| | `review_reason` | `visually_valid` / `invalid_annotation` など |
+| | `reviewer` | 自分のメールアドレス |
+| **画像自体を使うか** | Sample の `review_status` | `keep` / `exclude` |
+| | `review_reason` | `frontal_view` / `lateral_view` など |
+| | `reviewer` | 同上 |
+
+> **annotation の判定は必ず Detection 側に入れる。** 1枚の画像に複数の annotation が
+> あるので、Sample に付けるとどれがダメだったのか分からなくなる。
+> 逆に「この画像自体を使うか」は画像の属性なので Sample 側
+> （annotation を持たない33枚はここでしか判定できない）。
+
+> `reviewer` は空でも判定は有効だが、後から追えなくなる。埋めることを推奨
+> （空のままだと `review export` が警告を出して `unknown` で記録する）。
+
+### 3.8 判定を採否へ反映する
+
+```bash
+uv run segmentation-validation review export   # → review_decisions.json / .csv
+uv run segmentation-validation select          # → 採否へ反映（pending が減る）
+uv run segmentation-validation review status   # 進捗
+uv run segmentation-validation review precision  # → precision.md
+```
+
+**このループを pending が 0 になるまで繰り返す。**
+`select` は検出をやり直さないので、目視のたびに回しても速い。
+
+```
+review launch →（目視）→ review export → select → report
+```
+
+`review build` で DB を作り直したあとは、判定を DB へ戻しておく:
+
+```bash
+uv run segmentation-validation review export    # ★先に必ず export
+uv run segmentation-validation review build     # DB 再構築（export 済みなら安全）
+uv run segmentation-validation review import    # review_decisions.json から判定を復元
+```
+
+往復は実機で確認済み。4 annotation・2画像の判定を入れて
+`export → select → import` を回すと、DB の状態が採否マスタと一致するところまで戻る
+（annotation pending 251→247 / 画像 pending 33→31・exclude 1）。
+
+### 3.9 開発用データセットを生成する
+
+```bash
+uv run segmentation-validation build-dataset
+```
+
+`pending` / `uncertain` が残っていると**既定で止まる**（exit 1）。それが正しい。
+
+先に進める必要がある場合は「許可」と「扱い」の**両方**を明示する:
+
+```bash
+uv run segmentation-validation build-dataset \
+  --allow-pending --pending-as exclude \
+  --version-tag 20260904
+```
+
+`--allow-pending` だけではエラーになる。保留のまま黙って入る／落ちるのを防ぐため。
+override を使うと `development.json` の meta と `selection_summary.md` に記録される。
+
+→ `output/development/<dataset>/<version>/development.json` と
+`output/development/<version>/selection_summary.md`。
+
+**生成物の不変条件**（実測で確認済み）:
+
+- `development.json` の annotation 総数 == `keep` の件数
+- `file_list` のエントリ数 == 元JSON −（画像単位で落とした枚数）
+- `meta_development` に元JSONの **sha256**・fingerprint・ツール版・override が入る
+- **元JSONの sha256 は生成前後で変わらない**（`build-dataset` が毎回照合する）
+
+### 3.10 単一症例の重畳図（debug 用）
+
+FiftyOne を使わずに1症例だけ図で確認したいとき。
+
+```bash
+uv run python -m segmentation_validation.overlay_masks --institution kajinoki
+uv run python -m segmentation_validation.overlay_masks --study CXASW00000278_002 --original
+```
+
+---
+
+## 4. 成果物の読み方
+
+### `selection_summary.md` — まずここを見る
+
+「validationは終わったのか」「目視は終わったのか」「**開発データを作ってよいのか**」が
+このファイルだけで分かるようにしてある。末尾に判定が出る:
+
+```
+## 判定
+
+[BLOCKED] pending 251 件 / uncertain 0 件 が残っています
+Development JSON を生成してよいか: **no**
+```
+
+### `selection_decisions.csv` — 採否の正本
+
+`build-dataset` はこれだけを見る（`issues.csv` も FiftyOne DB も参照しない）。
+
+主な列:
+
+| 列 | 意味 |
+|---|---|
+| `geometry_uid` | 主キー。全域で一意 |
+| `patient_id` / `study` / `file_id` | 症例の所在。CSV単体で追える |
+| `detected_checks` | 検出された check_id（`\|` 区切り。無ければ `none`） |
+| `unverified_checks` | **検査できなかった** check_id（同上） |
+| `final_decision` | `keep` / `exclude` / `pending` / `uncertain` |
+| `reason` / `decision_source` | なぜ・誰が |
+| `review_status` | `not_needed` / `pending` / `reviewed` |
+| `kept_geometry_uid` / `duplicate_group_id` | 重複の対応関係 |
+| `reviewer` / `reviewed_at` / `comment` | 人が判断したときだけ |
+
+### `image_decisions.csv` — 画像単位の採否
+
+`selection_decisions` は annotation 単位なので、**annotation を持たない画像は1行も持たない**。
+しかし「この画像を開発データに含めるか」は別の判断が要るので、こちらを別に持つ。
+
+| `image_class` | 画像 | 採否 | 理由 |
+|---|---|---|---|
+| `annotated` | 863 | keep | 採否は annotation 単位で判定済み |
+| `negative_case` | 187 | keep | **正常例（No Findings）。陰性サンプルとして残す** |
+| `unannotated_view` | **33** | **pending** | 側面像なら除外が必要 |
+| `unannotated_orphan` | 0 | — | series 全体が未アノテーションで正常例ラベルも無い（防御） |
+
+`build-dataset` は両方を見る。**画像が `exclude` なら file entry ごと落とす。**
+これは「annotation が0件になっても file entry は残す」規則とは別で、
+**画像を落とすという明示的な判断があったときだけ**母集団を変える。
+画像に `pending` が残っていても既定で停止する。
+
+### `precision.md` — 自動ルールの答え合わせ
+
+`auto:`（機械の検出）と `review:`（人間の判定）を分けているので、
+自動検出のうち何割が本当に不正だったかが check ごとに出る。
+
+```
+auto:s05_outside_body  50件 → 目視 → exclude 18 / keep 8   Precision 0.69
+```
+
+- **Precision が高い** = そのルールは的を射ている。自動採否の候補にできるか検討する
+- **Precision が低い** = 検出の大半が正当。閾値を緩めるか、ルールごと外す
+- `uncertain` が多い = 判断基準そのものが曖昧。定義を決め直す
+
+分母は「目視済（exclude + keep + uncertain）」なので、途中でも意味のある値が出る。
+
+### 現在の採否（目視前）
+
+```
+規模                患者 982 / study 1044 / 画像 1083
+                    （annotation あり 863 / 正常例 187 / 未アノテーション 33）
+
+total annotations   1817   (brush 1665 / bbox 151 / elliptical 1)
+  keep              1465   患者 753 / study 808 / 画像 814
+    no_issue_detected        984   全チェック実行して問題なし
+    kept_without_full_check  481   体外判定が未実施のまま keep（未検証）
+  exclude            101   患者  75 / study  88 / 画像  88   全て D01 の古い方（自動）
+  pending            251   患者 177 / study 177 / 画像 177   FiftyOne 目視待ち
+  uncertain            0
+
+画像の採否          keep 1050 / pending 33
+Issue 合計          1364   annotation 単位 1144 / 画像単位 220（M09）
+                           severity  error 219 / warning 95 / info 1050
+                           status    checked 516 / cannot_determine 509 / not_applicable 339
+目視工数            251 annotation = 開く画像 177枚（＋未アノテーション 33枚は別途）
+```
+
+check 別の目視作業量。**annotation 数と画像枚数が最大2倍ちがう**ので、
+工数の見積りには画像枚数を使う。
+
+| check_id | annotation | 画像 |
+|---|---|---|
+| `S03_SUSPICIOUSLY_SMALL` | 121 | 105 |
+| `D04_CONTAINED_DIFFERENT_LABEL` | 69 | **32** |
+| `S05_OUTSIDE_BODY` | 47 | 44 |
+| `M07_BBOX_DEGENERATE` | 7 | 7 |
+| `D04_CONTAINED_DUPLICATE` | 6 | **3** |
+| `S04_ORIGINAL_FINAL_DIVERGENCE` | 6 | 6 |
+| `M07_BBOX_OUT_OF_IMAGE` | 4 | 4 |
+| `D03_NEAR_DUPLICATE` | 4 | **2** |
+| `S03_STRAY_COMPONENT` | 2 | 2 |
+| `S03_TINY_ANNOTATION` | 1 | 1 |
+| **重複を除いた合計** | **251** | **177** |
+
+D系で差が大きいのは、重複ペアが同じ画像内の annotation 同士だから（1画像に2件そろって出る）。
+除外による病変クラスの変化は `Findings/010`（気胸）915 → 814（-101）。
+全て画素完全一致の重複なので実質的な損失はない。
+
+### 何症例が合格したか
+
+annotation の採否は**症例単位では排他にならない**。1画像に keep と pending が混在する例が
+**216件**あるため、採否ごとの画像数を足すと実画像数を超える
+（keep 814 + exclude 88 + pending 177 = 1079 > 863）。
+
+そこで症例が持つ annotation 全体から状態を1つ決める。**1件でも未確定なら「要目視」**（安全側）。
+
+| 階層 | 合格（全keep） | 一部除外して確定 | 全除外 | 要目視 | 合計 |
+|---|---|---|---|---|---|
+| 患者 | **553** | 67 | 0 | 177 | 797 |
+| study | **599** | 81 | 0 | 177 | 857 |
+| 画像 | **605** | 81 | 0 | 177 | 863 |
+
+**全除外が0件**なのは、自動除外が完全一致の重複だけで、各ペアが同じ画像に2件そろって
+出るため必ず1件が残るから。annotation を全て失う画像は発生しない。
+
+データセット別（annotation を持つ分）:
+
+| データセット | 患者 | study | 画像 | annotation |
+|---|---|---|---|---|
+| ANN_EIRLPRJ_01272 | 264 | 307 | 313 | 559 |
+| ANN_EIRLPRJ_1298 | 414 | 414 | 414 | 982 |
+| ETR_..._mask136 | 119 | 136 | 136 | 276 |
+
+---
+
+## 5. バリデーション項目一覧
+
+### 検出された場合どうなるか（5分類）
+
+| 分類 | 意味 | 採否への影響 |
+|---|---|---|
+| **自動処理** | 機械が採否を確定 | `exclude` / `decision_source=automatic` |
+| **FiftyOne目視** | 人が画像を見て判断 | `pending` → 目視後に確定 |
+| **記録のみ** | 記録するだけ | `keep`（`no_issue_detected`） |
+| **判定不能** | 検査できなかった | `keep`（`kept_without_full_check`）＋ `unverified_checks` に記録 |
+
+（D01 の「自動 keep」は「このチェックでは除外しない」だけで最終keepではない。他チェックの判定へ進む。）
+
+### M系 — 機械的な整合性
+
+| check_id | 何を確認するか | 分類 | 件数 |
+|---|---|---|---|
+| `M01_MASK_RESOLUTION` | マスクPNGのサイズが DICOM の Rows/Columns と一致するか | 自動処理 | 0 |
+| `M01_MASK_RESOLUTION_JSON` | JSONの `series.shape` / `width,height` が DICOM と一致するか | 自動処理 | 0 |
+| `M02_MASK_NOT_GRAYSCALE` | `path_mask` が単チャンネル（mode=L）か | 自動処理 | 0 |
+| `M02_MASK_NOT_8BIT` | `path_mask` の dtype が uint8 か | 自動処理 | 0 |
+| `M02_ORIGINAL_AMBIGUOUS_CHANNELS` | `path_original_mask` が alpha を持たない多チャンネルでないか | 自動処理 | 0 |
+| `M03_MASK_NOT_BINARY` | `path_mask` の画素値が 0 と 255 だけか（**二値化前**に確認） | 自動処理 | 0 |
+| `M03_MASK_INVERTED` | 前景と背景が逆になっていないか | 自動処理 | 0 |
+| `M04_MASK_EMPTY` | 空マスクでないか（前景0px / 全画素同値） | 自動処理 | 0 |
+| `M04_MASK_FULL` | 画像のほぼ全面が前景になっていないか（既定95%超） | 自動処理 | 0 |
+| `M05_FILE_MISSING` | DICOM / マスクが存在するか | 自動処理 | 0 |
+| `M05_FILE_UNREADABLE` | **存在するが開けない**か（21バイトの `Internal Server Error` 等） | 自動処理 | 0 |
+| `M06_PATH_LEADING_SLASH` | パスが先頭スラッシュ付きで格納されていないか | 記録のみ | **2** |
+| `M06_PATH_UNEXPECTED_ROOT` | `image_path` が `medical2/`、マスクが `annotation/` 始まりか | 記録のみ | 0 |
+| `M06_PATH_UNEXPECTED_DEPTH` | `image_path` が8階層か（参照マスクのパス導出に必要） | 記録のみ | 0 |
+| `M06_PATH_NAME_MISMATCH` | **マスクのファイル名が `geometry_uid` と一致するか** | 記録のみ | 0 |
+| `M07_BBOX_DEGENERATE` | bbox が退化していないか（`min_x >= max_x` 等） | **目視** | **7** |
+| `M07_BBOX_OUT_OF_IMAGE` | bbox が画像範囲をはみ出していないか | **目視** | **4** |
+| `M07_SIZE_FIELDS_NULL` | 非brushで `width`/`height` が null（**正常。件数の記録のみ**） | 記録のみ | **152** |
+| `M08_JSON_BBOX_MISMATCH` | JSONの `min/max` が実マスクの bbox と一致するか | 記録のみ | 0 |
+| `M08_REGION_COUNT_MISMATCH` | `region_count` が連結成分数と一致するか | 記録のみ | 0 |
+| `M09_UNANNOTATED_VIEW` | annotation を持たない画像（他ビューは済み） | **目視**（画像単位） | **33** |
+| `M09_NEGATIVE_CASE` | annotation を持たないが正常例として明示されている | 記録のみ | **187** |
+| `M09_UNANNOTATED_SERIES` | series 全体が未アノテーションで正常例ラベルも無い | **目視**（画像単位） | 0 |
+
+> **M01–M05 と M08 が全て0件なのは正常。** `path_mask` は 1665/1665 が
+> mode=L・uint8・値{0,255}・DICOMとサイズ一致・bbox一致・region_count一致で、
+> 規定を完全に満たしている。**将来のエクスポートで壊れたときに気付くための回帰検知**として稼働中。
+>
+> **M01–M05 が「目視」でなく「自動処理」なのはなぜか。** 解像度が合わないマスクや
+> 存在しないファイルは、人が画像を見て判断する余地が無い。とくに `M05_FILE_MISSING` は
+> **画像もマスクも存在しないので FiftyOne に表示できない**。機械が確定的に
+> 「使えない」と判定できるので自動 exclude にしてある（severity=ERROR かつ
+> status=checked のときのみ。original マスクの INFO や判定不能は巻き込まない）。
+> 実データでは0件なので、この挙動は合成データ8ケースで検証した。
+>
+> **M06 / M08 が「記録のみ」なのはなぜか。** パス規約違反と JSON宣言値のズレは
+> 取り込み側の問題で、マスク自体の品質とは別。除外ではなく修正を依頼すべきもの。
+>
+> **M07 は分けている。** モジュール全体は「記録のみ」だが、座標が明確に壊れている
+> `M07_BBOX_DEGENERATE` / `M07_BBOX_OUT_OF_IMAGE` の11件だけを目視に上げている
+> （config は「具体的な指定が勝つ」2段階照合）。
+
+### D系 — 重複アノテーション（形 × ラベルの2軸）
+
+同じ画像の中の異なる `geometry_uid` を比較する。軸は2つ:
+
+- **幾何**: 画素完全一致 / IoU ≥ 0.95 / 包含率 ≥ 0.98
+- **ラベル**: `(code_system, code)` が同じか違うか
+
+| check_id | 何を確認するか | 分類 | 件数 |
+|---|---|---|---|
+| `D01_EXACT_DUPLICATE` | 画素**完全一致**かつ**ラベルも同じ** | **自動処理** | **202**（=101ペア×2） |
+| `D02_EXACT_MASK_LABEL_CONFLICT` | 完全一致だが**ラベルが違う** | 目視 | 0 |
+| `D03_NEAR_DUPLICATE` | IoU ≥ 0.95 だが完全一致でない。ラベルは同じ | 目視 | **4**（=2ペア×2） |
+| `D03_OVERLAPPING_DIFFERENT_FINDING` | IoU ≥ 0.95 で**ラベルが違う** | 目視 | 0 |
+| `D04_CONTAINED_DUPLICATE` | 一方が他方にほぼ完全に包含される。ラベルは同じ | 目視 | **6**（=3ペア×2） |
+| `D04_CONTAINED_DIFFERENT_LABEL` | 包含されているが**ラベルが違う** | 目視 | **72**（=36ペア×2） |
+
+**ペアは1組につき2つの Issue を出す**（成果物の粒度を annotation に揃えるため）。
+相手は `related_geometry_uids`、同じ組は `duplicate_group_id` で束ねられる。
+`A≒B` かつ `B≒C` なら A/B/C が1グループになる（サイズ3のグループが実データに3件ある）。
+
+#### D01 だけ自動採否できる理由
+
+社内確認の結果:
+
+> データが完全一致なのでどちらでも学習上の影響はない。日付が新しい方を使うのが自然。
+
+なので `timestamp` が新しい方を keep、古い方を exclude する。
+
+- `geometry_uid` の大小は使わない
+- **`is_latest` は候補の絞り込みに使わない**（両方 1 でも存在し得る。実測でも brush は全件 1）。
+  severity の判定にだけ使う
+- `timestamp` が同値・欠損・解釈不能なら**自動決定せず目視へ回す**
+  （実データでは0件だが再エクスポートでは起こり得る。合成データで検証済み）
+
+**D01 の keep は最終keepではない。**「D01では除外されない」だけなので、
+残った側が体外領域にも引っかかっていれば `pending` になる。
+片方のチェックだけで採用を決めない。
+
+#### D04 でラベルが違う72件の注意
+
+IoU が 0.002〜0.09 と非常に低いのに包含率が 1.0。つまり**小さい所見が大きい所見の
+内側にある「入れ子」**で、結節が浸潤影の中にあるといった**正当なケースが大半**の見込み。
+だから severity は `info` に留め、自動除外せず目視の判断に委ねている。
+Precision が低ければルールごと外せばよい。
+
+### S系 — 疑わしいもの
+
+| check_id | 何を確認するか | 分類 | 件数 |
+|---|---|---|---|
+| `S03_TINY_ANNOTATION` | annotation 全体の面積が 20mm² 未満 | 目視 | **1** |
+| `S03_STRAY_COMPONENT` | **本体に付いた微小な連結成分（飛びカス）。** 20mm² 未満または全体の1%未満 | 目視 | **5** |
+| `S03_SUSPICIOUSLY_SMALL` | クラス族ごとの下限を下回る、またはその3倍までのレビュー帯 | 目視 | **124** |
+| `S03_NO_SPACING` | `spacing` が無く面積を mm² で評価できない | 判定不能 | 0 |
+| `S04_ORIGINAL_FINAL_DIVERGENCE` | **修正前マスクを穴埋めした結果が修正後と一致しない** | 目視 | **6** |
+| `S05_OUTSIDE_BODY` | 胸郭から再構成した領域の外にマスクがはみ出している | 目視 | **50** |
+| `S05_REFERENCE_UNAVAILABLE` | 参照マスクが無く体外判定ができない | 判定不能 | **509** |
+
+#### S03 が2段構えな理由
+
+annotation 全体の面積だけを見ると、**38万pxの本体に1〜2pxの飛びカスが付いている**
+ケースが絶対に見えない。実際にそういう annotation が1件ある
+（morinomiyako、8621mm² の本体に 0.0225 / 0.045 / 0.045 mm² の3つ）。
+だから連結成分単位でも検査する。
+
+面積は原則 **mm²**。`spacing` が施設・機種で 0.0875〜0.2 と5.2倍ぶれるので、
+px のままでは同じ画素数が施設によって5倍違う面積を指してしまう。
+
+クラス族ごとに閾値を変えているのは、面積分布が log空間で滑らかな連続分布で
+**恣意的でない切れ目が存在しない**ため。一律「100mm²未満」にすると58件挙がるが、
+そのうち43件は結節（正当に小さい病変）で検出予算をそこに食われる。
+
+| クラス族 | 対象ラベル | 下限 | レビュー帯 |
+|---|---|---|---|
+| `focal` | nodule 系 | 20 mm² | 20〜60 mm² |
+| `localized` | atelectasis / bulla_bleb / cavity / fracture 等 | 50 mm² | 50〜150 mm² |
+| `regional` | 気胸 / 胸水 / 浸潤影 / 間質影 等 | 150 mm² | 150〜450 mm² |
+
+現在の124件は「下限未満 19件」＋「レビュー帯 105件」。
+**この閾値は目視の結果で確定させる前提の暫定値。** 20mm² は仕様上の禁止値ではなく
+実測分布上の外れ値（全クラスの実測最小 22.88mm² を下回り、1px と 747px の間に
+747倍の空白がある、という統計的な根拠しかない）。だから error にせず自動除外もしない。
+
+#### S04 が何を見ているか
+
+`path_original_mask`（修正前）の輪郭を `cv2.floodFill` で穴埋めした結果を
+`path_mask`（修正後）と比較する。一致すれば「修正後は修正前の塗りつぶし版」であり正常。
+食い違う場合だけを目視対象にする。
+
+**「修正前と違う → error」ではない。** 修正が正常に行われた結果である可能性が高い。
+
+| dataset | geometry_uid | IoU | 差分 |
+|---|---|---|---|
+| ANN_EIRLPRJ_01272 | `eeb4e8a2…` | 0.144 | 661,739 px (85.6%) |
+| ANN_EIRLPRJ_1298 | `a5b4711a…` | 0.176 | 498,097 px (82.4%) |
+| ETR_..._mask136 | `04d9b185…` | 0.616 | 137,563 px (38.4%) |
+| ANN_EIRLPRJ_01272 | `ae28a32b…` | 0.404 | 161,269 px (59.6%) |
+| ANN_EIRLPRJ_1298 | `6c0e1706…` | 0.261 | 116,633 px (73.9%) |
+| ETR_..._mask136 | `55b774ff…` | 0.99993 | 67 px（再エンコード誤差） |
+
+#### S05 の指標と閾値
+
+参照マスクから作った側方バンド（[6.4](#64-reference-maskthorax--lung--mediastinum)）に対して
+3つの値を出す:
+
+```
+containment  マスクのうちバンド内（マージン10mm以内）にある画素の割合
+outside_mm2  バンド外にある実面積
+max_mm       バンド外への最大逸脱距離
+```
+
+| severity | 条件 | 件数 |
+|---|---|---|
+| error | `containment < 0.80` | 6 |
+| warning | `containment < 0.98` かつ `outside_mm2 > 100mm²` | 20 |
+| info | `containment < 1.0` | 24 |
+
+比率だけだと巨大マスクの30mmのトゲを過小評価し、実面積だけだと巨大マスクが軒並み
+引っかかるので両方を使う。「1画素でも外なら検出」は使えない（マージン0mmだと
+731/1156 = 63.2% が該当）。マージン10mmの根拠は実測: 0mm=731件 / 5mm=126件 /
+**10mm=50件** / 20mm=19件で、膝が5〜10mmの間にある。参照曲線は肋骨・胸膜の**内縁**を
+なぞっており、気胸は壁側胸膜に接するので数mmの超過は境界誤差。
+
+**注目所見:** warning 以上の26件はアノテータに偏りがある。
+
+| アノテータ | 件数 |
+|---|---|
+| m.shinzato@hotmail.co.jp | 17 |
+| kolive23@gmail.com | 5（担当14件中の5件 = 35.7%） |
+| 他3名 | 各1 |
+
+`kolive23` の2件を描画確認したところ、いずれも**気胸マスクが右鎖骨上窩から
+肩・上腕の軟部組織に塗り出している**同じパターンだった。系統的な誤りの可能性がある。
+
+---
+
+## 6. データの中身
+
+### 6.1 規模
+
+| 階層 | データセット全体 | うち annotation あり |
+|---|---|---|
+| データセット（JSON） | 3 | 3 |
+| 患者 | **982** | 797 |
+| study（1回の検査） | **1044** | 857 |
+| 画像 | **1083** | **863** |
+| annotation | — | **1817** |
+
+**annotation を持たない 220 画像の正体:**
+
+| 区分 | 画像 | study | 扱い | 内容 |
+|---|---|---|---|---|
+| **正常例（No Findings）** | **187** | 187 | keep（陰性サンプル） | **187/187 が `No Findings/001 normal` を持ち、DICOM も実在する意図的な陰性症例** |
+| **未アノテーションのビュー** | **33** | — | **pending（目視）** | アノテーション済み study の2枚目以降（末尾 `_001`/`_002`）。分類ラベルも無い |
+
+JSON別:
+
+| データセット | file_list | ann あり | 正常例 | 未アノテーションのビュー |
+|---|---|---|---|---|
+| ANN_EIRLPRJ_1298 | 590 | 414 | **176**（すべて `ofuna_chuo`） | 0 |
+| ANN_EIRLPRJ_01272 | 357 | 313 | 11（`asahikawa` 7 / `okayama_chuo` 4） | **33** |
+| ETR_..._mask136 | 136 | 136 | 0 | 0 |
+
+未アノテーションのビュー33枚は**施設に強く偏っている**。
+
+| 施設 | series | うち2枚組 | 割合 |
+|---|---|---|---|
+| `nagoya_daiichi` | 41 | **27** | **65.9%** |
+| `asahikawa` | 230 | 5 | 2.2% |
+| `okayama_chuo` | 53 | 1 | 1.9% |
+
+**33 series すべてが「1枚目にアノテーションあり、2枚目なし」で完全に一貫**している。
+`nagoya_daiichi` は2方向撮影が標準で、アノテーションは1枚目にのみ付ける運用と読める。
+**側面像なら開発データから除外が必要**なので目視対象にしてある。
+
+`patient` と `study` を別に数えているのは、**1患者が複数の study を持つ例が実在する**ため
+（51患者が2件以上、最大5件）。1画像に複数の annotation があるので、
+**annotation 数は目視で開く枚数ではない** —— pending の 251 annotation は **177 画像**に含まれる。
+
+### 6.2 検証対象の病変
+
+**この3つのデータセットは気胸だけではない。**
+
+| データセット | brush | 気胸 | 気胸率 | 主な非気胸ラベル |
+|---|---|---|---|---|
+| ANN_EIRLPRJ_01272 | 491 | 320 | 65.2% | 間質性陰影 71 / ブラ・ブレブ 34 / 胸水 24 |
+| ANN_EIRLPRJ_1298 | 898 | 319 | **35.5%** | 間質性陰影 209 / 胸水 131 / 結節 98 |
+| ETR_..._mask136 | 276 | 276 | **100%** | — |
+| **合計** | **1665** | **915** | **55.0%** | |
+
+`mask136` だけが気胸専用。**既定は全病変を検証する。** 絞りかたは [7章](#7-設定)。
+
+### 6.3 `path_mask` と `path_original_mask` の違い
+
+社内確認の結果:
+
+```
+path_mask          = 修正後。開発データとして使用するもの
+path_original_mask = Annotation Tool が作成した修正前
+```
+
+修正の例は「閉曲線になっていない」「消しゴムの消し残り」。
+
+| | `path_mask` | `path_original_mask` |
+|---|---|---|
+| 件数 | 1665（brush 全件） | 1568（94%）。97件は無い |
+| 置き場 | `annotation/<task>/<site>/<date>/mask/` | `annotation/eirl_viewer_pjt/<pjt>/<timestamp>/brush/` |
+| ファイル名 | `<geometry_uid>.png` | `<geometry_uid>.png`（同じUID） |
+| PIL mode | **L のみ（1665/1665）** | RGBA 1462 / L 106 |
+| 画素値 | **0 / 255 の二値（例外なし）** | RGBA は alpha が 0〜255 の連続値 |
+| 中身 | 塗りつぶし済み | 生のブラシストローク（輪郭のみのことがある） |
+
+- **検証・学習には `path_mask` を使う**
+- **`path_original_mask` は比較用。** 存在すること自体は異常ではない（94%が持つ）ので
+  「存在する」だけでは Issue にしない。**穴埋め結果が食い違うものだけ**を S04 で拾う
+- RGBA を `path_mask` と同じ条件で検査しては**いけない**。実際に M02/M03 を
+  そのまま両方へ適用すると1400件超のノイズが出て本物の検出が埋まる
+  （RGBA は alpha が全件存在し二値化は一意なので正常）
+
+### 6.4 reference mask（thorax / lung / mediastinum）
+
+体外領域チェック（S05）で「どこまでが体内か」を決めるための、**別パイプラインの生成物**。
+データセットには含まれない。
+
+```
+/mnt/medicaldb/processed/lung-mask/<task>/<site>/<date>/<file_id>.png
+/mnt/medicaldb/processed/thorax-mask/...
+/mnt/medicaldb/processed/mediastinum-mask/...
+```
+
+`image_path` から導出する（`medical2` / split / `dcm_cr` / series の4成分を落とす）。
+ルートとこの規則は config の `reference_masks` で変更できる。
+
+**そのまま使えない。**
+
+| 参照 | 実測の姿 | 前景率 |
+|---|---|---|
+| `lung-mask` | 左右の肺野（塗りつぶし） | 28.1% |
+| **`thorax-mask`** | **左右の胸壁内縁をなぞる2本の細い曲線**（塗りつぶしではない） | **1.26%** |
+| `mediastinum-mask` | 縦隔（塗りつぶし） | 12.3% |
+
+- `thorax-mask` をそのまま「胸郭領域」として包含率を計算すると中央値 0.0295 になり、
+  **正常なマスクまで全件が「体外」になる**
+- `lung-mask` 単独も使えない。胸水・気胸は定義上、含気肺野の**外**にある
+  （胸水131件中111件 = 85% が包含率 < 0.5）
+
+そこで領域を組み直す（`datasets/pi6/outside_body.py`）:
+
+```
+rowfill(M)     各行 y について M の画素がある行を [min_x(y), max_x(y)] で埋める
+THORAX_REGION  rowfill(thorax) ∪ lung ∪ mediastinum を穴埋めして最大成分
+LATERAL_BAND   同じ行方向の範囲を全ての行へ外挿（上下は端の行を継承）
+```
+
+`LATERAL_BAND` は**垂直方向に無限**なので、肺尖への伸展や肋横角への胸水は罰しない。
+一方で胸壁より外側 —— **上腕・肩の軟部組織へのはみ出し** —— は確実に外になる。
+実測の裏付け: `THORAX_REGION` の外に出ている面積の **93.3% が側方**、下方は 6.7%。
+
+このロジックは PI6 固有なので `datasets/pi6/` に隔離してある。
+
+**整備状況**（毎回実測して `summary.md` に出る）:
+
+| データセット | brushを持つファイル | 3種そろい | annotation | 判定可 |
+|---|---|---|---|---|
+| ANN_EIRLPRJ_01272 | 296 | **0 (0.0%)** | 491 | **0 (0.0%)** |
+| ANN_EIRLPRJ_1298 | 397 | 397 (100%) | 898 | 898 (100%) |
+| ETR_..._mask136 | 136 | 122 (89.7%) | 276 | 258 (93.5%) |
+| **合計** | **829** | **519 (62.6%)** | **1665** | **1156 (69.4%)** |
+
+`01272` は丸ごと未整備。除けば 519/533 = 97.4%。
+欠損はファイル単位ではなく**バッチ日ディレクトリ単位**で起きている。
+
+判定できないときの内訳:
+
+| 理由 | annotation数 | 意味 |
+|---|---|---|
+| `cannot_determine:no_reference` | 500 | 参照マスクが1つも無い |
+| `cannot_determine:lung_only` | 8 | thorax が無く lung だけある |
+| `cannot_determine:reference_corrupt` | 1 | 存在するが壊れている（21バイトのテキスト） |
+| `cannot_determine:reference_shape_mismatch` | 0 | サイズが画像と合わない（防御） |
+
+**`lung_only` で lung ベースにフォールバックはしない。** 気胸・胸水は原理的に肺野の外に
+あるので lung 基準の包含率は意味を持たない（実測で 0.00〜0.93 とノイズ）。
+`reference_corrupt` を分けているのは対処が違うから（参照パイプラインの再実行が必要）。
+
+---
+
+## 7. 設定
+
+既定値は `config.py`。JSONファイルで上書きし、`--set` で単発上書きする。
+
+```bash
+uv run segmentation-validation show-config              # 解決後の設定を見る
+uv run segmentation-validation --set KEY=VALUE <cmd>    # 単発上書き
+uv run segmentation-validation --config config/my.json <cmd>
+```
+
+存在しないキーを指定するとエラーになる（設定ミスが黙って無視されるのを防ぐため）。
+
+### よく変えるもの
+
+```bash
+# 判定不能の509件も目視対象に加える（目視対象 251 → 約760）
+--set decision_policy.cannot_determine_as_review_required=true
+
+# 正常例187枚も目視対象に加える（「所見の見落としが無いか」まで確認したいとき）
+--set 'decision_policy.review_image_classes=["unannotated_view","unannotated_orphan","negative_case"]'
+
+# 気胸だけを検証する（対象 915 / 対象外 902、目視 251 → 102、画像 177 → 87枚）
+--set 'validation.target_labels=["Findings/010"]'
+
+# 微小領域の閾値
+--set thresholds.tiny_annotation_mm2=15
+--set 'thresholds.small_by_class_mm2={"focal":20,"localized":50,"regional":150}'
+
+# 重複の閾値
+--set thresholds.duplicate_iou_near=0.9
+--set thresholds.duplicate_containment=0.95
+
+# 体外領域のマージン
+--set reference_masks.margin_mm=15
+
+# 対象JSONを絞る（新しいJSONの追加も config の1行）
+--set 'datasets.exclude=["01272"]'
+--set 'datasets.sources=["../../../dataset/source/*1298*.json"]'
+
+# 参照マスクの置き場を変える
+--set 'reference_masks.roots={"lung":"/path/lung","thorax":"/path/thorax","mediastinum":"/path/med"}'
+
+# FiftyOne
+--set review.dataset_name=pi6-validation
+--set review.app_port=5151
+--set review.database_dir=/local/disk/mongo
+--set review.image_format=jpeg   # PNG(可逆)→JPEGで容量1/5。既定はPNG
+```
+
+**閾値を変えたら `check` → `select` → `report` → `gui` を回す。** `scan` は不要
+（計測値は閾値に依存しないので）。
+
+### 検証対象の病変を絞る
+
+同一性は `(code_system, code)` なので `"Findings/010"` が正式な書き方。
+`"pneumothorax"`（`code_text_eng`）でも指定できるが、`code_text` は表記揺れがあるので
+受け付けない（`Findings/010` に「気胸（塗りつぶし）」294件と「気胸（縁取り）」1件が混在）。
+
+- **対象内は全件検証する**（部分的に検証しない）
+- **対象外はチェックを一切走らせず**、`reason = out_of_scope` として1行残す。
+  `no_issue_detected`（検証して問題なし）と混ぜない
+- 対象外も `keep` のまま。開発データから落とすかは属性定義が固まってから決める
+
+> **bbox / elliptical 152件に気胸ラベルは1件もない**（fracture 42 / 縦隔拡大 14 / other 82 等）。
+> そのため気胸のみモードでは、座標が壊れている11件も全て対象外になる。
+> **全病変モードでしか M07 の異常は拾えない**ことは意識しておく。
+
+---
+
+## 8. 困ったとき
+
+| 症状 | 原因と対処 |
+|---|---|
+| `対象JSONが1件も見つからない` | `datasets.sources` の相対パスがずれている。`list-sources` で確認。既定は `../../../dataset/source/*.json` |
+| `計測キャッシュのスキーマ版が違う` | 計測値の構造が変わった。`scan --force` で作り直す |
+| **scan が異常に遅い**（数分で終わるはずが数十分） | 共有サーバーの NFS 競合。`cat /proc/loadavg` と `ps aux --sort=-%cpu \| head` で他ジョブを確認する。`--jobs` を増やしても改善しない（I/O 待ちなので逆効果）。なお OpenCV の内部スレッドは 1 に固定してある（`core/cpu.py`）—— 外すと 256コア × `--jobs` で数百スレッドになり全体が止まる |
+| `issues.json が無い` | `check` を先に実行する |
+| `selection_decisions.json が無い` | `select` を先に実行する |
+| **`issues.json は一部のチェックだけの結果`** | `check --only` で作った部分結果。`check` を `--only` なしで回し直す（`select --allow-partial` で強行もできるが採否は信用できない） |
+| **`review export していない人間の判定がある`** | `review export` してから `review build` する。捨ててよいなら `review build --discard-unexported` |
+| `pending が N 件残っている` | 目視を進める。急ぐなら `--allow-pending --pending-as exclude` を**両方**指定 |
+| `画像 N 枚が目視待ち` | 未アノテーションのビュー。`2-pending-images` ビューで判定する |
+| `fiftyone が無い` | `uv sync --group review` |
+| `FiftyOne dataset が無い` | `review build` を先に実行する |
+| App が開かない | SSH トンネルが張れているか。本サーバーで `ss -ltn \| grep 5151` |
+| mongod が起動しない / DBが壊れる | `FIFTYONE_DATABASE_DIR` が NFS 上にある。`findmnt -T` で確認してローカルディスクへ |
+| `保存ビューを作れない` | ビュー名に ASCII が無い。FiftyOne はビュー名を slug 化するので日本語だけの名前は失敗する |
+| `reviewer が未入力の判定が N 件ある` | App で `reviewer` を埋める。判定自体は有効で `unknown` として記録される |
+| cv2 の挙動が変 | `opencv-python` と `opencv-python-headless` が共存している。[2章](#2-環境構築)の確認コマンド |
+| DB を消してしまった | `review build` → `review import` で判定が戻る |
+
+### 終了コード
+
+`0` = error なし / `1` = error あり、またはゲートで停止 / `2` = ツール障害
+
+---
+
+## 9. 設計上の約束
+
+コードを触るときに壊してはいけないもの。
+
+| 約束 | なぜ |
+|---|---|
+| **画素ファイルを開くのは `core/measure.py` だけ** | 1665枚を1度だけ読むため。`checks/` は純関数 |
+| **`checks/` は `PIL` / `pydicom` / `Path.exists` を使わない** | 同上 |
+| **`import fiftyone` は `review/` の3モジュールだけ** | FiftyOne 無しで検証本体が動くため。`tests/test_no_fiftyone.py` が検査 |
+| **`selection_decisions` の行数 == annotation の件数** | 「全 annotation が必ず1行」が成果物の意味そのもの。毎回 assert |
+| **`image_decisions` の行数 == 画像の件数** | 同上 |
+| **元JSONは変更しない** | `build-dataset` が生成前後で sha256 を照合する |
+| **`auto:` は機械のみ、`review:` は人間のみ** | Precision を計算できるようにするため。再構築で `auto:` は貼り直し、人間の判定は保持 |
+| **FiftyOne の DB を正本にしない** | DB削除 → `review build` → `review import` で判定が戻ることを実機検証済み |
+| **annotation の判定は Label、画像の判定は Sample** | 1枚に複数 annotation があるので、Sample に付けるとどれがダメか分からない |
+| **元JSON形式の知識は `adapters/` だけ** | 別形式のデータセットが増えてもチェックを再利用できる |
+| **`checked` / `cannot_determine` / `not_applicable` の3値** | 「問題なし」と「未検査」を混同させない |
+| **ネイティブライブラリの内部スレッドは1に固定する**（`core/cpu.py`） | 並列化は `--jobs` のファイル単位で効かせる。OpenCV の既定は全コア（このサーバーは256）で、`--jobs` と掛け算になると数百スレッドになり共有サーバー全体を止める |
+
+### ディレクトリ構成
+
+```
+src/segmentation_validation/
+├── config.py         設定（対象JSON・参照マスク・全閾値・ポリシー）
+├── cli.py            コマンドライン入口
+├── adapters/         元JSON形式の知識。ここ以外は元JSONの階層を直接見ない
+├── core/             データセット非依存の走査・計測
+│   └── measure.py    ★画素ファイルを開くのはここだけ
+├── datasets/pi6/     PI6固有のロジック（体外領域の領域再構成）
+├── checks/           計測値を入力とする純関数。1チェック1ファイル
+│   ├── machine/      M01-M09
+│   ├── duplicate/    D01-D04
+│   └── suspicious/   S03-S05
+├── selection/        採否判断（自動判定 / 画像単位 / development.json 生成）
+├── report/           issues / selection / summary / precision / dashboard
+├── review/           FiftyOne（fiftyone を import するのは3モジュールだけ）
+└── viz/              matplotlib による重畳図
+
+assets/dashboard/     dashboard.html のテンプレート
+tests/                環境の不変条件を確かめるテスト
+plan/                 設計と実測の記録
+```
+
+### コマンド一覧
+
+```
+list-sources / list-checks / show-config    確認
+scan                                        画素の走査（キャッシュ）
+check                                       チェック実行 → issues
+select                                      採否確定 → selection / image decisions
+report                                      summary.md / area_distribution
+gui                                         dashboard.html
+review build / launch / status              目視レビュー
+review export / import / precision          判定の往復と答え合わせ
+build-dataset                               development.json
+```

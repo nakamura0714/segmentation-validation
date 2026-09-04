@@ -15,7 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from ..checks.base import Issue
 from ..config import Config
-from ..selection.decisions import Policy, policy_for
+from ..selection.decisions import effective_review_required
 
 CSV_COLUMNS: tuple[str, ...] = (
     "check_id",
@@ -54,7 +54,9 @@ def issue_to_row(issue: Issue, config: Config) -> dict[str, Any]:
         "severity": issue.severity.value,
         "status": issue.status.value,
         "review_priority": issue.review_priority.value,
-        "review_required": policy_for(issue.check_id, config) is Policy.REVIEW_REQUIRED,
+        "review_required": effective_review_required(
+            issue.check_id, issue.status, config
+        ),
         "dataset_id": issue.dataset_id,
         "source_json": issue.source_json,
         "institution": issue.institution,

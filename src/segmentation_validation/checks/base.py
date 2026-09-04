@@ -98,8 +98,13 @@ class CheckContext:
     """チェックへの入力一式。``cli`` が1度だけ組む。"""
 
     config: Config
+    # 検証対象の annotation のみ。config.validation.target_labels で絞られる。
+    # ここで絞ることで、15個のチェックを触らずに全てがスコープに従う。
+    # ペア系も相手が対象外なら ``by_uid`` に無いので自動的に片側だけ報告される。
     records: tuple[AnnotationRecord, ...]
-    groups: tuple[FileGroup, ...]
+    # 対象外の annotation。チェックは走らせないが採否マスタには1行残す。
+    out_of_scope: tuple[AnnotationRecord, ...] = ()
+    groups: tuple[FileGroup, ...] = ()
     # dataset_id -> パス規約（M06 が使う。規約は形式固有なのでアダプタが持つ）
     path_invariants: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     # 以下は scan 済みのときだけ埋まる。JSONだけで判定できるチェックは空でも動く。
@@ -165,6 +170,78 @@ class CheckContext:
             duplicate_group_id=duplicate_group_id,
             cannot_determine_reason=cannot_determine_reason,
         )
+
+    def file_issue(
+        self,
+        check_id: str,
+        group: FileGroup,
+        message: str,
+        *,
+        category: Category,
+        severity: Severity = Severity.WARNING,
+        status: CheckStatus = CheckStatus.CHECKED,
+        review_priority: ReviewPriority = ReviewPriority.NORMAL,
+        **detail: Any,
+    ) -> Issue:
+        """画像単位の Issue を作る。``geometry_uid`` は None。
+
+        annotation を持たない画像について報告するために必要。
+        annotation が無いのだから ``geometry_uid`` は存在しない。
+        採否は ``selection.image_decisions`` が画像単位で持つ。
+        """
+        return Issue(
+            check_id=check_id,
+            category=category,
+            severity=severity,
+            status=status,
+            review_priority=review_priority,
+            dataset_id=group.dataset_id,
+            source_json=group.source_json,
+            institution=group.institution,
+            study=group.study,
+            series=group.series,
+            file=group.file,
+            file_uid=group.file_uid,
+            geometry_uid=None,
+            annotation_type=None,
+            image_path=group.image_path,
+            mask_path=None,
+            message=message,
+            detail=detail,
+        )
+
+
+#: 画像の分類。annotation を持たない画像の正体を区別する。
+class ImageClass(StrEnum):
+    ANNOTATED = "annotated"  # annotation を持つ
+    NEGATIVE_CASE = "negative_case"  # 正常例（No Findings）
+    UNANNOTATED_VIEW = "unannotated_view"  # 同じ series の他画像はアノテーション済み
+    UNANNOTATED_ORPHAN = "unannotated_orphan"  # series 内に1件もアノテーションが無い
+
+
+IMAGE_CLASS_JA = {
+    ImageClass.ANNOTATED: "annotation あり",
+    ImageClass.NEGATIVE_CASE: "正常例（No Findings）",
+    ImageClass.UNANNOTATED_VIEW: "未アノテーション（他ビューは済み）",
+    ImageClass.UNANNOTATED_ORPHAN: "未アノテーション（series全体）",
+}
+
+
+def classify_image(group: FileGroup, series_annotated: bool) -> ImageClass:
+    """画像1枚の分類。
+
+    ``series_annotated`` は同じ series の他の画像にアノテーションがあるか。
+    「アノテーション漏れ」と「正常例」と「そもそも対象外」を区別するため。
+    """
+    if group.records:
+        return ImageClass.ANNOTATED
+    if group.is_negative_case:
+        return ImageClass.NEGATIVE_CASE
+    return (
+        ImageClass.UNANNOTATED_VIEW
+        if series_annotated
+        else ImageClass.UNANNOTATED_ORPHAN
+    )
 
 
 class Check(Protocol):

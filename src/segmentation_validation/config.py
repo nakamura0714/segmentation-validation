@@ -36,6 +36,27 @@ class DatasetsConfig:
 
 
 @dataclass(frozen=True)
+class ValidationConfig:
+    """検証の対象範囲。
+
+    ``target_labels`` が空なら**全病変を検証する**（既定）。
+    絞る場合はラベルを列挙する。同一性は ``(code_system, code)`` で判断するので
+    ``"Findings/010"`` が正式な書き方だが、``"pneumothorax"``（code_text_eng）でも
+    指定できる。``code_text`` は表記揺れがあるので受け付けない
+    （実測で ``Findings/010`` に「気胸（塗りつぶし）」と「気胸（縁取り）」が混在）。
+
+    対象外の annotation はチェックを一切走らせず、採否マスタに
+    ``reason = out_of_scope`` として1行残す。黙って ``no_issue_detected`` に
+    混ぜない —— 「検証して問題なし」と「検証対象外」は別物。
+
+    例: 気胸だけを検証する
+        "target_labels": ["Findings/010"]
+    """
+
+    target_labels: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class RootsConfig:
     """JSON内の相対パスを解決する基準ルート。
 
@@ -115,8 +136,23 @@ class DecisionPolicyConfig:
     check_id をコードへ埋めずここに置くのは、判断を後から変えられるようにするため。
     """
 
-    # 自動で採否を決めてよいもの。完全一致・同一ラベル・timestamp差ありのみ。
-    auto_decidable: list[str] = field(default_factory=lambda: ["D01_EXACT_DUPLICATE"])
+    # 自動で採否を決めてよいもの。
+    # D01 は「完全一致・同一ラベル・timestamp差あり」なので新しい方を残せる。
+    # M01-M05 は解像度不一致・非二値・RGB混入・空マスク・ファイル欠損で、
+    # いずれも機械が確定的に判定でき、人が画像を見て判断する余地が無い
+    # （M05_FILE_MISSING は画像もマスクも存在しないので目視自体が不可能）。
+    # ERROR かつ checked のものだけを自動 exclude する。
+    # original マスクの INFO や判定不能は対象にしない。
+    auto_decidable: list[str] = field(
+        default_factory=lambda: [
+            "D01_EXACT_DUPLICATE",
+            "M01_MASK_RESOLUTION",
+            "M02_MASK_CHANNELS",
+            "M03_MASK_BINARY",
+            "M04_MASK_NOT_EMPTY",
+            "M05_FILE_EXISTS",
+        ]
+    )
     # 検出されたら人間の確認へ回すもの。machine error も自動除外はしない
     # （壊れたマスクを「除外する」のか「修正を依頼する」のかは人間が決める）。
     review_required: list[str] = field(
@@ -129,15 +165,12 @@ class DecisionPolicyConfig:
             "S03_SUSPICIOUSLY_SMALL",
             "S04_ORIGINAL_FINAL_DIVERGENCE",
             "S05_OUTSIDE_BODY",
-            "M01_MASK_RESOLUTION",
-            "M02_MASK_CHANNELS",
-            "M03_MASK_BINARY",
-            "M04_MASK_NOT_EMPTY",
-            "M05_FILE_EXISTS",
             # M07 全体は記録のみだが、座標が明確に壊れているこの2種だけは人が見る。
             # 具体的な指定が informational の "M07_BBOX_GEOMETRY" に優先する。
             "M07_BBOX_DEGENERATE",
             "M07_BBOX_OUT_OF_IMAGE",
+            # 未アノテーションのビュー。側面像なら除外が必要なので目視で判断する。
+            "M09_UNANNOTATED_VIEW",
         ]
     )
     # 記録だけして採否には影響させないもの。
@@ -146,11 +179,25 @@ class DecisionPolicyConfig:
             "M06_PATH_FORMAT",
             "M07_BBOX_GEOMETRY",
             "M08_JSON_MASK_CONSISTENCY",
+            # 非brushで width/height が null なのは正常。記録のみ。
+            "M07_SIZE_FIELDS_NULL",
         ]
     )
     # 判定不能を目視対象に含めるか。現状は false。
     # true にすると参照マスクの無い501件が目視キューに加わる。
     cannot_determine_as_review_required: bool = False
+    # annotation を持たない画像のうち、どの分類を目視に回すか。
+    #
+    #   unannotated_view    アノテーション済み study の2枚目以降（実測33枚）。
+    #                       側面像なら開発データから除外が必要なので目視で判断する
+    #   unannotated_orphan  series 全体が未アノテーションで正常例ラベルも無い（実測0枚）
+    #   negative_case       正常例（No Findings）。実測187枚。
+    #                       既定では目視に回さない —— DICOMも実在し陰性症例として
+    #                       明示されているため。「所見の見落としが無いか」まで
+    #                       確認したい場合はここに追加する
+    review_image_classes: list[str] = field(
+        default_factory=lambda: ["unannotated_view", "unannotated_orphan"]
+    )
 
 
 @dataclass(frozen=True)
@@ -174,6 +221,7 @@ class Config:
 
     project_root: Path = PROJECT_ROOT
     datasets: DatasetsConfig = field(default_factory=DatasetsConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     roots: RootsConfig = field(default_factory=RootsConfig)
     reference_masks: ReferenceMasksConfig = field(default_factory=ReferenceMasksConfig)
     thresholds: ThresholdsConfig = field(default_factory=ThresholdsConfig)

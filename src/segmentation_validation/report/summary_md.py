@@ -18,11 +18,15 @@ from ..checks.base import CheckStatus, Issue, Severity
 from ..config import Config
 from ..core.measure import ROLE_MASK, FileMeasurement, MaskMeasurement
 from ..selection.decisions import (
+    CASE_STATUS_JA,
+    CaseStatus,
     Decision,
     DecisionSource,
     Reason,
     ReviewStatus,
     SelectionDecision,
+    count_case_status,
+    count_cases,
 )
 from .issues_json import summarize as summarize_issues
 
@@ -107,7 +111,38 @@ def write_summary(
     add(f"- 対象JSON: {len(meta.get('sources', []))} 件")
     for source in meta.get("sources", []):
         add(f"  - `{source}`")
-    add(f"- annotation: {meta.get('n_annotations')} / ファイル: {meta.get('n_files')}")
+    scale = meta.get("scale") or {}
+    population = meta.get("population") or {}
+    if population.get("total"):
+        # 大きい数はデータセット全体。annotation を持つ分はその内訳。
+        total = population["total"]
+        add(
+            f"- 規模: 患者 **{total['patients']}** / study **{total['studies']}** "
+            f"/ 画像 **{total['images']}**"
+        )
+        add(
+            f"  - annotation あり **{population['annotated']['images']}** 画像"
+            f"（annotation {scale.get('annotations')} 件）← 検証対象"
+        )
+        add(
+            f"  - 正常例 **{population['negative']['images']}** 画像"
+            "（No Findings。study 全体がアノテーションなし = 意図的な陰性症例）"
+        )
+        add(
+            f"  - 未アノテーション **{population['unannotated']['images']}** 画像"
+            "（アノテーション済み study の2枚目以降）"
+        )
+    elif scale:
+        add(
+            f"- 規模: 患者 **{scale['patients']}** / study **{scale['studies']}** "
+            f"/ series {scale['series']} / 画像 **{scale['images']}** "
+            f"/ annotation **{scale['annotations']}**"
+        )
+    else:
+        add(
+            f"- annotation: {meta.get('n_annotations')} "
+            f"/ ファイル: {meta.get('n_files')}"
+        )
     if meta.get("n_non_geometry"):
         add(f"- 対象外（study/seriesレベルの分類ラベル）: {meta['n_non_geometry']} 件")
     add("")
@@ -200,6 +235,8 @@ def write_selection_summary(
     issues: Sequence[Issue],
     empty_files: int,
     meta: dict[str, Any],
+    image_decisions: Sequence[Any] = (),
+    images_dropped: int | None = None,
 ) -> None:
     """採否の要約。Development JSON を作ってよいかの判定を必ず出す。"""
     counts = _decision_counts(decisions)
@@ -218,8 +255,48 @@ def write_selection_summary(
         add(f"- **override を使用**: {meta['overrides']}")
     add("")
 
+    cases = count_cases(decisions)
+    population = meta.get("population") or {}
+    add("## 規模")
+    add("")
+    if population.get("total"):
+        t_, a_, n_, u_ = (
+            population["total"],
+            population["annotated"],
+            population["negative"],
+            population["unannotated"],
+        )
+        add(
+            "データセット全体               "
+            f"画像 {t_['images']} / study {t_['studies']} / 患者 {t_['patients']}"
+        )
+        add(
+            "  annotation あり（検証対象）   "
+            f"画像 {a_['images']} / study {a_['studies']} / 患者 {a_['patients']}"
+        )
+        add(
+            "  正常例（No Findings）        "
+            f"画像 {n_['images']} / study {n_['studies']}"
+        )
+        add(
+            f"  未アノテーション              画像 {u_['images']}"
+            "（アノテーション済み study の2枚目以降）"
+        )
+        add("")
+        add("以下の採否は annotation を持つ分が母数。")
+        add("")
+    add(f"患者                           {cases['patients']}")
+    add(f"study                          {cases['studies']}")
+    add(f"画像                           {cases['images']}")
+    add(
+        f"annotation                     {cases['annotations']}   "
+        f"({_fmt(counts['type'])})"
+    )
+    add("")
+    add("## 採否（annotation 単位）")
+    add("")
     total = len(decisions)
-    add(f"total annotations              {total}   ({_fmt(counts['type'])})")
+    add(f"total annotations              {total}")
     add(f"  keep                         {counts['decision'].get('keep', 0)}")
     add(
         f"    no_issue_detected          "
@@ -235,6 +312,30 @@ def write_selection_summary(
     add(f"  exclude                      {counts['decision'].get('exclude', 0)}")
     add(f"  pending                      {pending}")
     add(f"  uncertain                    {uncertain}")
+    add("")
+
+    # 「何症例が合格したか」。採否ごとの症例数は重複するのでこちらを正とする。
+    add("## 症例単位の状態（合格した症例数）")
+    add("")
+    status = count_case_status(decisions)
+    order = [
+        CaseStatus.PASSED,
+        CaseStatus.PARTIAL,
+        CaseStatus.ALL_EXCLUDED,
+        CaseStatus.NEEDS_REVIEW,
+    ]
+    header = "| 階層 | " + " | ".join(CASE_STATUS_JA[s] for s in order) + " | 合計 |"
+    add(header)
+    add("|---|" + "---|" * (len(order) + 1))
+    for label, key in (("患者", "patients"), ("study", "studies"), ("画像", "images")):
+        cells = " | ".join(str(status[key][s.value]) for s in order)
+        add(f"| {label} | {cells} | {status[key]['total']} |")
+    add("")
+    add(
+        "annotation の採否は症例単位では排他にならない"
+        "（1画像に keep と pending が混在する）。1件でも未確定なら症例全体を"
+        "「要目視」とする。"
+    )
     add("")
 
     add("## 判断の内訳")
@@ -266,18 +367,58 @@ def write_selection_summary(
         add("     対象は selection_decisions.csv の unverified_checks != none で絞れる")
     add("")
 
+    if image_decisions:
+        # 画像単位の採否。annotation を持たない画像はこちらでしか扱えない。
+        from ..selection.image_decisions import summarize_images
+
+        img = summarize_images(list(image_decisions))
+        add("## 画像単位の採否（annotation を持たない画像を含む）")
+        add("")
+        add(f"画像                           {img['total']}")
+        for name, count in sorted(img["by_class"].items(), key=lambda kv: -kv[1]):
+            add(f"  {name:28s} {count}")
+        add("")
+        add(f"採否: {_fmt(img['by_decision'])}")
+        add(f"理由: {_fmt(img['by_reason'])}")
+        if img["pending"]:
+            add("")
+            add(
+                f"★画像 {img['pending']} 枚が目視待ち。"
+                "未アノテーションのビューで、側面像なら開発データから除外が必要。"
+            )
+        add("")
+
     add("## FiftyOne 目視の進捗")
     add("")
     targets = sum(1 for d in decisions if d.review_required)
     reviewed = counts["review_status"].get(ReviewStatus.REVIEWED.value, 0)
-    add(f"review対象                      {targets}")
+    add(f"review対象                      {targets} annotation")
     add(f"  review完了                    {reviewed}")
     add(f"  review未完了 (pending)        {pending}     <- 0 が完了条件")
+    add("")
+    # annotation 数だけでは開く画像の枚数が分からない。1画像に複数 annotation がある。
+    pc = count_cases([d for d in decisions if d.final_decision is Decision.PENDING])
+    add("目視の実作業量（pending を含む症例）:")
+    add(f"  患者                          {pc['patients']}")
+    add(f"  study                         {pc['studies']}")
+    add(f"  画像                          {pc['images']}     <- 開く枚数")
     add("")
 
     add("## 影響")
     add("")
     add(f"annotationが0件になったfile     {empty_files}")
+    if image_decisions:
+        from ..selection.image_decisions import summarize_images
+
+        excluded = summarize_images(list(image_decisions))["excluded"]
+        add(f"画像を exclude と判定した枚数   {excluded}（image_decisions 上の判定）")
+        # ★ override を使うと pending の画像も落ちる。判定上の exclude 数だけを
+        # 出すと実際に落ちた枚数を大幅に少なく見せてしまう。
+        if images_dropped is not None:
+            note = ""
+            if images_dropped != excluded:
+                note = "  <- override で pending の画像も落ちている"
+            add(f"実際に落とした画像の枚数       {images_dropped}{note}")
     add("")
     add("除外により失われた病変クラス:")
     add("")
@@ -293,9 +434,20 @@ def write_selection_summary(
 
     add("## 判定")
     add("")
+    overrides = meta.get("overrides") or {}
     if ready:
         add("[OK] pending / uncertain なし")
         add("Development JSON を生成してよいか: **yes**")
+    elif overrides:
+        # ★ override で生成した場合。「ブロックされた」で終わると、
+        # 生成物が既に存在することが読み取れない。
+        add(f"[OVERRIDE] pending {pending} 件 / uncertain {uncertain} 件 が残っている")
+        add(f"それを承知で override して生成した: `{overrides}`")
+        add("")
+        add(
+            "**この Development JSON は目視未完了の状態のもの。**"
+            "確定版が必要なら pending を 0 にしてから再生成する。"
+        )
     else:
         add(f"[BLOCKED] pending {pending} 件 / uncertain {uncertain} 件 が残っています")
         add("Development JSON を生成してよいか: **no**")

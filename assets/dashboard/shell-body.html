@@ -1,0 +1,221 @@
+<header class="top">
+  <div class="top-in">
+    <div class="title-block">
+      <span class="eyebrow">ChestMetry PI6 · セグメンテーション検証</span>
+      <h1>検証トリアージ</h1>
+      <p>各 annotation が「開発データに使うか」まで確定している。</p>
+      <dl class="scale" id="scale"></dl>
+      <p class="note-line" id="population"></p>
+      <p class="mono" id="fp"></p>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-end">
+      <button class="theme-btn" id="theme">配色を切り替え</button>
+      <div class="verdict">
+        <span class="dot pending" aria-hidden="true"></span>
+        <span><strong>development.json は生成できない</strong><br>
+          pending が 251 件残っている（目視完了の条件は pending = 0）</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="flow">
+    <span class="eyebrow">最終採否 — 1817 annotation の全量</span>
+    <div class="flow-bar" id="flow" role="group" aria-label="採否の内訳。クリックで下の一覧を絞り込む"></div>
+    <div class="flow-legend" id="flow-legend"></div>
+    <p class="workload" id="workload"></p>
+
+    <div class="case-block">
+      <span class="eyebrow">症例単位の状態 — 何症例が合格したか</span>
+      <p class="note-line">annotation の採否は症例単位では<b>排他にならない</b>
+        （1画像に keep と pending が混在する例が <b>216</b> 件ある）。
+        そこで症例が持つ annotation 全体から状態を1つ決めている。
+        <b>1件でも未確定なら症例全体が「要目視」</b>。</p>
+      <div class="tbl-scroll">
+        <table id="tbl-cases"><thead><tr>
+          <th>階層</th><th class="r">合格（全keep）</th><th class="r">一部除外して確定</th>
+          <th class="r">全除外</th><th class="r">要目視</th><th class="r">合計</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+  </div>
+
+  <section id="sec-images" hidden>
+    <div class="sec-head">
+      <h2>画像単位の採否</h2>
+      <p>annotation を持たない画像は <span class="mono">selection_decisions</span> に行を持てないので、
+         <span class="mono">image_decisions.csv</span> が画像単位（1画像=1行）で採否を持つ。</p>
+    </div>
+    <p class="note-line" id="img-note"></p>
+    <div class="charts two">
+      <figure>
+        <figcaption>画像の分類</figcaption>
+        <p class="note">annotation の有無と、無い場合の正体で分ける。</p>
+        <div class="tbl-scroll">
+          <table id="tbl-imgclass"><thead><tr>
+            <th>分類</th><th class="r">画像</th><th>意味</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </figure>
+      <figure>
+        <figcaption>目視待ちの画像</figcaption>
+        <p class="note">側面像などであれば開発データから除外する必要がある。</p>
+        <div class="tbl-scroll" style="max-height:300px;overflow-y:auto">
+          <table id="tbl-imgpend"><thead><tr>
+            <th>施設</th><th>patient / study</th><th>file_id</th>
+          </tr></thead><tbody></tbody></table>
+        </div>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>対象病変の構成</h2>
+      <p>この3つのデータセットは<b>気胸だけではない</b>。検証対象は
+         <span class="mono">config.validation.target_labels</span> で絞れる（既定は全病変）。</p>
+    </div>
+    <p class="note-line" id="target-note"></p>
+    <div class="tbl-scroll">
+      <table id="tbl-labels"><thead><tr>
+        <th>データセット</th><th class="r">brush</th><th class="r">気胸</th>
+        <th style="width:180px">気胸の割合</th><th>主な非気胸ラベル</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>251件の目視対象は何か</h2>
+      <p>延べ267件の該当を重複排除した内訳。バーをクリックすると下の一覧が絞られる。</p>
+    </div>
+    <div class="charts">
+      <figure>
+        <figcaption>check_id 別の pending annotation 数</figcaption>
+        <p class="note">濃いバーが annotation 数、薄いバーが<b>開く画像の枚数</b>。
+           1画像に複数 annotation があるので枚数はこれより少ない。
+           2つのチェックに同時に該当する annotation が16件あるため、合計は251を超える。</p>
+        <div id="chart-pending"></div>
+      </figure>
+    </div>
+    <div class="callout">
+      <p><b>なぜ目視が必要なのか。</b> 機械で「怪しい」と分かっても、それが誤入力なのか医学的に妥当なのかは画像を見ないと決まらないものが大半だから。</p>
+      <p><span class="mono">S03_SUSPICIOUSLY_SMALL</span>（121件）— 面積分布に恣意的でない切れ目が存在しない。<b>この目視結果で閾値そのものを確定させる。</b></p>
+      <p><span class="mono">D04_CONTAINED_DIFFERENT_LABEL</span>（69件）— IoU 0.002〜0.09 で包含率 1.0。「小さい所見が大きい所見の内側」= 結節が浸潤影の中にある等、<b>正当なケースが大半の見込み</b>。重複として捨ててはいけない。</p>
+      <p><span class="mono">S05_OUTSIDE_BODY</span>（47件）— 参照曲線は胸膜の内縁で、気胸は壁側胸膜に接する。数mmの超過が境界誤差か本物のはみ出しかは画像でしか分からない。</p>
+      <p><span class="mono">M07_BBOX_DEGENERATE</span> / <span class="mono">M07_BBOX_OUT_OF_IMAGE</span>（11件）— 座標が明確に壊れているが、<b>「除外する」のか「修正を依頼する」のかは人が決める</b>（自動採否は D01 のみという方針）。</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>閾値がまだ決まっていない2つ</h2>
+      <p>どちらも実測分布から暫定値を置いているだけで、目視の結果で確定させる前提。</p>
+    </div>
+    <div class="charts two">
+      <figure>
+        <figcaption>S03 マスク面積の分布（1665件）</figcaption>
+        <p class="note">log軸。単峰の連続分布で自然な切れ目が無い。破線がクラス族ごとの下限。</p>
+        <div id="chart-area"></div>
+      </figure>
+      <figure>
+        <figcaption>S05 体外領域の裾（判定できた1156件のうち50件）</figcaption>
+        <p class="note">残り1106件は包含率 1.0（マージン10mm以内に完全に収まる）。点にカーソルを当てると症例が出る。</p>
+        <div id="chart-outside"></div>
+      </figure>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>チェック台帳</h2>
+      <p>実装されている全 check_id。0件のものも載せている（将来のエクスポートで壊れたときに気付くための回帰検知として稼働中）。
+         見出しで開閉、行をクリックすると下の一覧が絞られる。</p>
+    </div>
+    <div id="families"></div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>annotation を見る</h2>
+      <p>行をクリックすると、その annotation に出た Issue の中身が開く。</p>
+    </div>
+    <div class="filters">
+      <label for="f-dec">採否</label>
+      <select id="f-dec"><option value="">すべて</option></select>
+      <label for="f-check">check</label>
+      <select id="f-check"><option value="">すべて</option></select>
+      <label for="f-inst">施設</label>
+      <select id="f-inst"><option value="">すべて</option></select>
+      <label for="f-ds">データセット</label>
+      <select id="f-ds"><option value="">すべて</option></select>
+      <input id="f-q" type="search" placeholder="geometry_uid / study / file で検索" aria-label="検索">
+      <span id="f-active"></span>
+    </div>
+    <p class="count-line" id="count"></p>
+    <div class="tbl-scroll">
+      <table id="tbl-ann">
+        <thead><tr>
+          <th>geometry_uid</th><th>施設 / patient / study</th><th>種別</th><th>所見</th>
+          <th class="r">面積 mm²</th><th class="r">包含率</th><th>検出されたcheck</th><th>採否</th><th>理由</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="more"><button id="more" hidden>さらに表示</button></div>
+  </section>
+
+  <section id="sec-precision" hidden>
+    <div class="sec-head">
+      <h2>自動ルールの Precision</h2>
+      <p><span class="mono">auto:</span>（機械の検出）と <span class="mono">review:</span>（人間の判定）を
+         分けているので、自動検出のうち何割が本当に不正だったかが後から出せる。</p>
+    </div>
+    <p class="note-line" id="prec-note"></p>
+    <div class="tbl-scroll">
+      <table id="tbl-precision"><thead><tr>
+        <th>check_id</th><th class="r">検出</th><th class="r">目視済</th>
+        <th class="r">exclude</th><th class="r">keep</th><th class="r">uncertain</th>
+        <th class="r">Precision</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-head">
+      <h2>読み方</h2>
+      <p>数字の意味を後から思い出せなくならないように。</p>
+    </div>
+    <dl class="glossary">
+      <div class="gl-row"><dt>症例の階層</dt><dd>
+        <b>患者 → study（1回の検査） → series → 画像 → annotation</b> の入れ子。
+        1患者が複数の study を持つ例が実在する（<b>51患者</b>が2件以上、最大5件）ので患者と study は別に数える。
+        1画像に複数の annotation があるため、<b>annotation 数は目視で開く枚数ではない</b>。
+        なお <span class="mono">file_list</span> の総数 1083 に対し annotation を持つのは 863画像で、
+        残り <b>220画像は annotation ゼロ</b>。</dd></div>
+      <div class="gl-row"><dt>auto: / review: タグ</dt><dd>
+        FiftyOne 上で<b>機械は <span class="mono">auto:</span> タグしか付けず、人間は
+        <span class="mono">review:</span> タグと <span class="mono">review_*</span> フィールドしか触らない</b>。
+        再構築のたびに <span class="mono">auto:</span> は貼り直され、人間の判定は保持される。
+        この分離のおかげで自動ルールの Precision を後から計算できる。
+        <b>annotation の判定は Label（Detection）に、画像の判定は Sample に</b>持たせる ——
+        1枚に複数 annotation があるので、Sample タグに付けるとどれがダメだったのか分からなくなる。</dd></div>
+      <div class="gl-row"><dt>Issue</dt><dd><b>「怪しい」と検出された候補。</b>1つの annotation が複数持つことがある（全1144件）。<b>Issue があること自体は除外を意味しない。</b>微小領域として検出されても、目視で妥当なら keep になる。検出の記録は消えないので、後から自動ルールの Precision を計算できる。</dd></div>
+      <div class="gl-row"><dt>SelectionDecision</dt><dd><b>最終的な採否。</b><span class="mono">selection_decisions.csv</span> が採否の唯一の正本で、<span class="mono">build-dataset</span> はこれだけを見る。<b>全 annotation が必ず1行ある</b>（1817行）。Issue が1つも出なかった正常な annotation も keep として1行出る。</dd></div>
+      <div class="gl-row"><dt>keep</dt><dd>開発データに使う。</dd></div>
+      <div class="gl-row"><dt>exclude</dt><dd>使わない。現在は全て D01（完全一致の重複）の古い方。</dd></div>
+      <div class="gl-row"><dt>pending</dt><dd><b>まだ人が見ていない。</b>目視待ち。<b>pending = 0 が目視完了の条件。</b></dd></div>
+      <div class="gl-row"><dt>uncertain</dt><dd>見たが判断できなかった（要相談・保留）。現在0件。</dd></div>
+      <div class="gl-row"><dt>no_issue_detected</dt><dd>全チェックが実行され、問題が見つからなかった（984件）。</dd></div>
+      <div class="gl-row"><dt>kept_without_full_check</dt><dd><b>一部のチェックが実行できないまま keep した</b>（481件）。「検査して問題なかった」のではなく<b>「検査できなかった」</b>。体外判定に必要な胸郭マスクが約3割のファイルで未整備なため。黙って keep にすると「問題なし」と「未検査」が区別できなくなるので、別の理由として記録している。</dd></div>
+      <div class="gl-row"><dt>older_exact_duplicate</dt><dd>画素が完全一致しラベルも同じ重複のうち、timestamp が古い方（101件）。「完全一致なのでどちらでも学習上の影響はない。日付が新しい方を使うのが自然」との確認に基づく自動判定。</dd></div>
+      <div class="gl-row"><dt>unverified_checks</dt><dd>その annotation について<b>検査できなかった check_id</b>。現在509件が非空。用途は2つ：「検査して問題なし」と「検査できていない」を区別する／<b>後から目視対象に加えるときの絞り込みキーになる</b>（設定 <span class="mono">cannot_determine_as_review_required</span> を true にすると、ちょうどこの集合が目視キューに入る）。</dd></div>
+      <div class="gl-row"><dt>path_mask</dt><dd><b>修正後。開発データとして使うもの。</b>brush 全1665件に存在し、mode=L・画素値 0/255 の例外なし。</dd></div>
+      <div class="gl-row"><dt>path_original_mask</dt><dd><b>Annotation Tool が作成した修正前。</b>1568件（94%）が持つので存在自体は異常ではない。RGBA 1462件（ブラシのアンチエイリアスが alpha に入る）+ L 106件。<b>path_mask と同じ条件で検査してはいけない</b> — 実際に同一視すると1400件超のノイズが出て本物の検出が埋まる。<span class="mono">S04</span> は「輪郭を穴埋めした結果が path_mask と食い違うもの」だけを拾う。</dd></div>
+      <div class="gl-row"><dt>reference mask</dt><dd><b>体外領域判定で「どこまでが体内か」を決める、別パイプラインの生成物。</b>lung / thorax / mediastinum の3種。<b>PI6 の thorax-mask は塗りつぶし領域ではなく胸壁内縁をなぞる2本の細い曲線</b>（前景1.26%）で、そのまま包含率を計算すると中央値 0.0295 になり正常なマスクまで全件が「体外」になる。lung 単独も使えない（胸水・気胸は定義上、含気肺野の外。実測で胸水131件中111件が包含率0.5未満）。そこで3種から領域を組み直し、行方向の範囲を上下へ外挿した「側方バンド」を作る。垂直方向は罰しないので肺尖への伸展や肋横角の胸水は許容し、<b>胸壁より外側 = 上腕・肩へのはみ出しだけ</b>を拾う。</dd></div>
+      <div class="gl-row"><dt>cannot_determine</dt><dd>検査できなかった状態。<b>keep にはするが unverified_checks に記録する。</b>内訳は no_reference 500 / lung_only 8 / reference_corrupt 1（21バイトの Internal Server Error というテキストファイルが混ざっている）。lung_only で lung ベースにフォールバックはしない — 気胸は原理的に肺野の外にあるので意味を持たないため。</dd></div>
+    </dl>
+  </section>
+</div>
