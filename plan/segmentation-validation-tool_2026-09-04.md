@@ -407,7 +407,7 @@ spacing が無い場合は `cannot_determine_mm2`（実測2件）。
 | ID | 条件 | severity | review priority | **実測** |
 |---|---|---|---|---|
 | `S03_TINY_ANNOTATION` | `area_mm2 < 20` | **WARNING** | critical | **1件** |
-| `S03_STRAY_COMPONENT` | `n_comp>1 かつ (comp_mm2 < 20 または comp_px/ann_px < 0.01)` | **WARNING** | critical | **5成分 / 4 annotation** |
+| `S03_STRAY_COMPONENT` | `n_comp>1 かつ (comp_mm2 < 20 または comp_px/ann_px < 0.01)` | **WARNING** | critical | **5成分 / 3 annotation** |
 | `S03_SUSPICIOUSLY_SMALL` | クラス別下限 F 未満（focal 20 / localized 50 / regional 150 mm²） | WARNING | high | **20件** |
 | （レビュー帯） | `F ≤ area < 3F` | INFO | normal | 105件 |
 
@@ -476,7 +476,7 @@ severity INFO    : lat_cont(10) < 1.0                             -> 50件
 |---|---|---|
 | `checked` | 1156 (69.4%) | |
 | `cannot_determine:lung_only` | 8 | lung へのフォールバックは**しない**（気胸は肺野外にあるので原理的に無意味） |
-| `cannot_determine:no_reference` | **501 (30.1%)** | 01272 が丸ごと (0/296ファイル) |
+| `cannot_determine:no_reference` | **500** | 01272 が丸ごと (0/296ファイル) |
 | `cannot_determine:reference_corrupt` | 1件実在 | 参照パイプラインの再実行対象 |
 | `cannot_determine:reference_shape_mismatch` | 現状0 | 防御 |
 
@@ -562,7 +562,8 @@ related_geometry_uids, duplicate_group_id
 
 ★**dataset内の全 geometry annotation について必ず1行**。現データでは **1817行**
 （brush 1665 + bbox 151 + elliptical 1）。
-study/series レベルの分類 annotation（237件、`annotation_id` を持つ別スキーマ）は geometry ではないので対象外。件数だけ summary に出す。
+study/series レベルの分類 annotation（**332件** = study 271 + series 61、`annotation_id` を持つ別スキーマ）は
+geometry ではないので対象外。件数だけ summary に出す。
 
 | 列 | 内容 |
 |---|---|
@@ -1085,10 +1086,10 @@ Phase 9 まででレビュー用の材料は全部揃うので、**FiftyOne が�
 | duplicate group（全体） | **139個**（サイズ2:136、サイズ3:3） |
 | 旧条件の再現（IoU≥0.9 & both_latest & user相違） | **85ペア**（既存CSVと一致） |
 | S03 tiny annotation | **1件**（jsrt `323fe9b4-…`、1px） |
-| S03 stray component | **5成分 / 4 annotation** |
+| S03 stray component | **5成分 / 3 annotation**（`db2e2140` / `42fef131` / `2a4eec84`） |
 | S04 original-final 不一致 | mask136 で **2件** |
 | S05 outside body | ERROR **6件** / WARNING **26件** |
-| S05 cannot_determine | **501 annotation**（01272 は 0/296 ファイル） |
+| S05 cannot_determine | **合計 509 annotation** = no_reference 500 / lung_only 8 / reference_corrupt 1（01272 は 0/296 ファイル） |
 | 参照カバレッジ | ファイル **519/829 (62.6%)** / annotation **1156/1665 (69.4%)** |
 | M07 bbox | degenerate **7件** / 範囲外 **4件** |
 | M08 | bbox・region_count とも**不一致0件**（回帰検知） |
@@ -1107,12 +1108,53 @@ len(selection_decisions) == len(annotation_records) == 1817
 geometry_uid は一意、欠損なし
 final_decision は {keep, exclude, uncertain, pending} のいずれか
 review_status=not_needed なら final_decision in {keep, exclude}
-unverified_checks != "none"  <=>  reason == "kept_without_full_check"  （policy=false のとき）
+reason == "kept_without_full_check"  ==>  unverified_checks != "none"
+  （逆は成立しない。判定不能を持つ annotation でも review_required な Issue が
+    あれば pending が優先される —— ラダーの4が5より前だから）
 policy を true にしたとき、review対象 == 従来の対象 ∪ {unverified_checks != "none"}
 decision_source=human なら reviewer と reviewed_at が非null
 development.json の annotation 総数 == keep の件数
 development.json の file entry 数 == Original の file entry 数（0件fileも残すため）
 ```
+
+### 実装後の実測値（Phase 1-9 / 13 完了時点、2026-09-04）
+
+パイプラインを全走査で通した結果。計画の期待値と食い違ったものは ★。
+
+| 項目 | 実測 | 備考 |
+|---|---|---|
+| 走査時間 | **1分53秒**（1083ファイル / jobs=8） | キャッシュ 6.9MB / files 1083・masks 3233・pairs 1446行 |
+| mask行 | final 1665 + original 1568 = 3233 | `path_original_mask` の件数と一致 |
+| `M01`-`M05` / `M08` | **全て0件** | `path_mask` は 1665/1665 が mode=L・uint8・値{0,255}・bbox一致・region_count一致 |
+| ★ `M02`/`M03` を original に同条件で適用すると | 1462 / 1459 件のノイズ | RGBA の alpha は全件存在し二値化は一意。**original を同じ土俵で検査してはいけない**。M02 は「alphaの無い多チャンネル」のみ（実測0件）、M03 は `path_mask` 限定に修正 |
+| `D01` | 202 issue = **101ペア × 2** | 全て mask136。施設別 eiju_sogo 41 / ishikawa_health_service 29 / ofuna_chuo 9 |
+| `D02` | 0 | 回帰検知として稼働 |
+| `D03` | 4 issue = 2ペア × 2 | |
+| `D04` | 78 issue = 39ペア × 2（同ラベル3 / 異ラベル36） | |
+| `S03` | tiny 1 / stray **5成分・3 annotation** / 下限未満 19 / レビュー帯 105 | ★下限未満19 + tiny 1 = 計画の20 |
+| ★ `S04` | **6件**（mask136 に2件、01272 に2件、1298 に2件） | 計画は mask136 の2件のみ既知。**他2JSONで新たに4件**見つかった（IoU 0.14〜0.40 で差分が大きい） |
+| `S05` | error 6 / warning 20 / info 24 = 50 | ★計画の「warning 26」は error を含む数。error 6 + warning 20 = 26 で一致 |
+| `S05` 判定不能 | 509 = no_reference 500 / lung_only 8 / corrupt 1 | |
+| S05 アノテータ別（warning以上） | m.shinzato 17 / kolive23 5 / 他3名 各1 | kolive23 は 14件中5件 = 35.7% |
+| 自動採否 | **exclude 101 / keep 101 / 自動決定不能 0** | timestamp tie・欠損・parse不能は0件 |
+| `selection_decisions` | **1817行**、geometry_uid 一意 | keep 1465 / exclude 101 / pending 251 |
+| review 対象 | **258**（うち pending 251） | 差の7件は D01 で exclude 確定済み |
+| `kept_without_full_check` | **481** | 509 のうち28件は review_required も持つため pending が優先 |
+| 除外による病変クラスの減少 | Findings/010 915 → 814（-101） | 全て完全一致の重複なので実質的な損失なし |
+
+**★実装で判明した設計上の修正**
+
+1. **`policy_for` の照合は2段階が必要だった。** 派生ID（`M07_BBOX_DEGENERATE`）が
+   モジュールID（`M07_BBOX_GEOMETRY`）と文字列一致しないため、当初の実装では
+   未分類扱いで安全側の pending に落ちていた。
+   「具体的な指定が勝つ」二段階照合にした結果、`M07` 全体を informational にしつつ
+   座標が明確に壊れている `M07_BBOX_DEGENERATE` / `M07_BBOX_OUT_OF_IMAGE` の
+   11件だけを review_required に上げられるようになった。
+2. **`original` を `path_mask` と同じ条件で検査してはいけない**（上表参照）。
+3. **`build-dataset` の「0件になったfile」は元から空のファイルを除外して数える。**
+   元から annotation を持たないファイルが多数あり、含めると意味のない数になる。
+4. `unverified_checks != none ⟹ kept_without_full_check` は**片方向のみ**成立する
+   （pending が優先されるため）。
 
 ### synthetic test（実データに存在しないケースを担保する）
 

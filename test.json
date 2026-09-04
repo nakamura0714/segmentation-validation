@@ -1,0 +1,66 @@
+{
+    "dataset": {
+        "asahikawa": {
+            "CXASW00000826_001": {
+                "patient_id": "CXASW00000826",
+                "study_name": "CXASW00000826_001",
+                "study_date": "2016-02-14 20:57:52+00:00",
+                "series_list": {
+                    "CXASW00000826_001_001": {
+                        "spacing": {
+                            "x": 0.2,
+                            "y": 0.2,
+                            "z": null
+                        },
+                        "shape": {
+                            "w": 1760,
+                            "h": 1760,
+                            "z": 1
+                        },
+                        "manufacturer": "fujifilm",
+                        "file_list": {
+                            "CXASW00000826_001_001_000": {
+                                "image_path": "medical2/chest_cr_screening/train-ok/asahikawa/20220112_abnormal/dcm_cr/CXASW00000826_001_001/CXASW00000826_001_001_000.dcm",
+                                "annotations": [
+                                    {
+                                        "annotation_type": "brush",
+                                        "path_mask": "annotation/chest_cr_screening/asahikawa/20220112_abnormal/mask/9a162cb2-f00d-4e12-9b9d-bf5c31127460.png",
+                                        "path_original_mask": "annotation/eirl_viewer_pjt/295/20260116055537/brush/9a162cb2-f00d-4e12-9b9d-bf5c31127460.png",
+                                        "geometry_id": 1125903,
+                                        "geometry_uid": "9a162cb2-f00d-4e12-9b9d-bf5c31127460",
+                                        "min_x": 1005,
+                                        "min_y": 113,
+                                        "max_x": 1473,
+                                        "max_y": 472,
+                                        "width": 1760,
+                                        "height": 1760,
+                                        "points": null,
+                                        "timestamp": "2026-01-12 01:02:57+00:00",
+                                        "user": "m.shinzato@hotmail.co.jp",
+                                        "version": 0,
+                                        "group_id": null,
+                                        "is_latest": 1,
+                                        "annotation_request": 243,
+                                        "region_count": 1,
+                                        "comment": null,
+                                        "labels": [
+                                            {
+                                                "label_id": 1294861,
+                                                "code": "010",
+                                                "code_system": "Findings",
+                                                "code_text": "気胸（塗りつぶし）",
+                                                "code_text_eng": "pneumothorax",
+                                                "confidence": null
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        },
+                        "groups": []
+                    }
+                }
+            }
+        }
+    }
+}
