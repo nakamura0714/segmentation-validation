@@ -526,7 +526,7 @@ def _gui(config: Config, args: argparse.Namespace) -> int:
 def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     from .report.selection_output import read_image_json, read_selection_json
     from .report.summary_md import write_selection_summary
-    from .selection.build_dataset import build_development_json
+    from .selection.build_dataset import build_development_json, gate_message
 
     out_dir = config.validation_dir / _fingerprint(config)
     selection_path = out_dir / "selection_decisions.json"
@@ -544,16 +544,16 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     by_image = {row["file_uid"]: row["final_decision"] for row in image_rows}
     img_pending = sum(1 for v in by_image.values() if v == "pending")
     img_uncertain = sum(1 for v in by_image.values() if v == "uncertain")
-    if img_pending and not (args.allow_pending and args.pending_as):
-        logger.error(
-            "画像 %d 枚が目視待ち（未アノテーションのビュー）。"
-            "目視を進めるか `--allow-pending --pending-as keep|exclude` を明示すること",
-            img_pending,
-        )
-        return EXIT_ISSUES
-    if img_uncertain and not (args.allow_uncertain and args.uncertain_as):
-        logger.error("画像 %d 枚が uncertain のまま", img_uncertain)
-        return EXIT_ISSUES
+    # annotation 側と画像側で同じ規則。判断は gate_message に一本化してある。
+    gates = (
+        ("pending", img_pending, "画像", args.allow_pending, args.pending_as),
+        ("uncertain", img_uncertain, "画像", args.allow_uncertain, args.uncertain_as),
+    )
+    for kind, count, subject, allow, treat_as in gates:
+        message = gate_message(kind, count, subject, allow, treat_as)
+        if message:
+            logger.error("%s", message)
+            return EXIT_ISSUES
     # override 時は画像側にも同じ扱いを適用する。
     if args.pending_as:
         by_image = {
@@ -567,20 +567,15 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
 
     # override は「許可」と「扱い」の両方を明示させる。
     # 片方だけでは通さない —— 保留が黙って入る／落ちるのを防ぐため。
-    if pending and not (args.allow_pending and args.pending_as):
-        logger.error(
-            "pending が %d 件残っている。目視を進めるか "
-            "`--allow-pending --pending-as keep|exclude` を明示すること",
-            pending,
-        )
-        return EXIT_ISSUES
-    if uncertain and not (args.allow_uncertain and args.uncertain_as):
-        logger.error(
-            "uncertain が %d 件残っている。`--allow-uncertain "
-            "--uncertain-as keep|exclude` を明示すること",
-            uncertain,
-        )
-        return EXIT_ISSUES
+    gates = (
+        ("pending", pending, "annotation", args.allow_pending, args.pending_as),
+        ("uncertain", uncertain, "annotation", args.allow_uncertain, args.uncertain_as),
+    )
+    for kind, count, subject, allow, treat_as in gates:
+        message = gate_message(kind, count, subject, allow, treat_as)
+        if message:
+            logger.error("%s", message)
+            return EXIT_ISSUES
 
     version_tag = args.version_tag or datetime.now(timezone.utc).strftime("%Y%m%d")
     results = []

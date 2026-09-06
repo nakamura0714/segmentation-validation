@@ -36,6 +36,31 @@ class PendingPolicy:
     KEEP = "keep"
 
 
+def gate_message(
+    kind: str, count: int, subject: str, allow: bool, treat_as: str | None
+) -> str | None:
+    """未確定が残っているとき生成を止めるべきか判断する。
+
+    止めるなら理由の文言、進めてよいなら ``None`` を返す。
+
+    **override は「許可」と「扱い」の両方が揃って初めて成立する。**
+    片方だけで通すと、保留が黙って開発データへ入る（または黙って落ちる）ので、
+    ``--allow-pending`` だけでは進まない。
+
+    ``kind`` は ``pending`` / ``uncertain``、``subject`` は ``annotation`` / ``画像``。
+    annotation 側と画像側で同じ規則を使うため、判断をここに一本化している。
+    """
+    if not count:
+        return None
+    if allow and treat_as:
+        return None
+    flag = f"--allow-{kind}"
+    return (
+        f"{subject} {count} 件が {kind} のまま。"
+        f"目視を進めるか `{flag} --{kind}-as keep|exclude` を明示すること"
+    )
+
+
 @dataclass
 class BuildResult:
     """生成結果。件数は必ずレポートへ出す。"""

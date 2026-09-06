@@ -5,13 +5,19 @@
 実際に import・実行してみる。
 
 実行:
-    uv run python tests/test_no_fiftyone.py
+    uv run pytest tests/test_no_fiftyone.py    # 別プロセスで走らせる
+    uv run python tests/test_no_fiftyone.py    # 単体でも走る
+
+★**pytest からは必ず別プロセスで呼ぶ。** ``builtins.__import__`` を差し替えて
+``sys.modules`` から fiftyone を消すので、同じプロセスの他のテストを壊す。
 """
 
 from __future__ import annotations
 
 import builtins
+import subprocess
 import sys
+from pathlib import Path
 
 BLOCKED = ("fiftyone",)
 
@@ -100,6 +106,21 @@ def main() -> int:
         return 1
     print("ALL OK: fiftyone が無くても検証本体は動く")
     return 0
+
+
+def test_fiftyoneが無くても検証本体が動く():
+    """このファイル自身を別プロセスで走らせる。
+
+    import フックをプロセスごと隔離しないと、同じ pytest セッションの
+    他のテストが fiftyone を import できなくなる。
+    """
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve())],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ALL OK" in result.stdout
 
 
 if __name__ == "__main__":

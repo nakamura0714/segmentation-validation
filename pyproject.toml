@@ -25,6 +25,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "pytest>=9.0.2",
     "ruff>=0.16.5",
 ]
 # 目視レビュー用。検証本体は fiftyone を import しないので `uv sync` だけで動く。
@@ -41,3 +42,18 @@ select = ["E", "F", "I"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 実データ・FiftyOne・時間のかかるものは既定で走らせない。
+# 既定の `uv run pytest` は合成データだけで数秒で終わること。
+addopts = "-q -m 'not realdata and not fiftyone'"
+markers = [
+    "realdata: 実データ（/mnt のデータセットJSONと走査キャッシュ）を必要とする",
+    "fiftyone: fiftyone と mongod を必要とする",
+]
+filterwarnings = [
+    # fiftyone 1.21 が datetime.utcnow() を大量に使っており、
+    # 1回の実行で475件出て結果が読めなくなる。こちらでは直せない。
+    "ignore:datetime.datetime.utcnow:DeprecationWarning",
+]

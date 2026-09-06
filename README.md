@@ -202,10 +202,36 @@ uv run python -c "import importlib.metadata as m, cv2; \
   if d.metadata['Name'] and 'opencv' in d.metadata['Name'].lower()])"
 #   -> 4.14.0 ['opencv-python-headless']
 
-# fiftyone が無くても検証本体が動くか
-uv run python tests/test_no_fiftyone.py
-#   -> ALL OK: fiftyone が無くても検証本体は動く
+# テストを流す（合成データだけ。1秒で終わる）
+uv run pytest
+#   -> 221 passed
 ```
+
+### テスト
+
+```bash
+uv run pytest                  # 既定。合成データだけで 221件 / 約1秒
+uv run pytest -m realdata      # 実データの既知値 38件（走査キャッシュが必要）
+uv run pytest -m fiftyone      # FiftyOne の往復 10件（uv sync --group review が必要）
+uv run pytest -m 'realdata or fiftyone'   # 全部
+```
+
+**閾値やポリシーを意図的に変えたら `-m realdata` も一緒に更新する。**
+既知値の一覧は [tests/test_realdata_known_values.py](tests/test_realdata_known_values.py)
+の先頭にまとまっている。更新せずに落ちたら、それは意図しない変更が入ったということ。
+
+| ファイル | 何を守っているか |
+|---|---|
+| [test_d01_automatic.py](tests/test_d01_automatic.py) | D01 の自動採否。**`timestamp` の同値/欠損/解釈不能は実データ0件なのでここでしか担保できない** |
+| [test_broken_masks.py](tests/test_broken_masks.py) | M01–M05 の自動 exclude。**実データ0件。**severity/status/category の3条件が緩むと大量誤除外 |
+| [test_decision_ladder.py](tests/test_decision_ladder.py) | 採否の優先順位。**「D01 の keep は最終keepではない」**を含む |
+| [test_image_decisions.py](tests/test_image_decisions.py) | 正常例187枚と未アノテーション33枚の取り違え防止 |
+| [test_gates.py](tests/test_gates.py) | 3つのゲート（部分 issues / 未export判定 / override）|
+| [test_review_layer.py](tests/test_review_layer.py) | `auto:`/`review:` の分離、機械の判定を human にしない、壊れた bbox の表示 |
+| [test_architecture.py](tests/test_architecture.py) | 構造の不変条件を AST で検査（[9章](#9-設計上の約束)） |
+| [test_no_fiftyone.py](tests/test_no_fiftyone.py) | fiftyone を実行時に遮断して検証本体が動くことを確認 |
+| [test_review_roundtrip.py](tests/test_review_roundtrip.py) | **DB削除 → 再構築 → import で判定が戻る**（`-m fiftyone`）|
+| [test_realdata_known_values.py](tests/test_realdata_known_values.py) | 実データの既知値（`-m realdata`）|
 
 ---
 
@@ -1034,7 +1060,7 @@ uv run segmentation-validation --config config/my.json <cmd>
 |---|---|
 | **画素ファイルを開くのは `core/measure.py` だけ** | 1665枚を1度だけ読むため。`checks/` は純関数 |
 | **`checks/` は `PIL` / `pydicom` / `Path.exists` を使わない** | 同上 |
-| **`import fiftyone` は `review/` の3モジュールだけ** | FiftyOne 無しで検証本体が動くため。`tests/test_no_fiftyone.py` が検査 |
+| **`import fiftyone` は `review/` の3モジュールだけ** | FiftyOne 無しで検証本体が動くため。`test_architecture.py`（AST）と `test_no_fiftyone.py`（実行時）が検査 |
 | **`selection_decisions` の行数 == annotation の件数** | 「全 annotation が必ず1行」が成果物の意味そのもの。毎回 assert |
 | **`image_decisions` の行数 == 画像の件数** | 同上 |
 | **元JSONは変更しない** | `build-dataset` が生成前後で sha256 を照合する |
@@ -1065,9 +1091,15 @@ src/segmentation_validation/
 └── viz/              matplotlib による重畳図
 
 assets/dashboard/     dashboard.html のテンプレート
-tests/                環境の不変条件を確かめるテスト
+tests/                pytest。合成データ / 実データ既知値 / FiftyOne往復
 plan/                 設計と実測の記録
 ```
+
+上の表の約束のうち、AST で機械的に検査しているものは
+[tests/test_architecture.py](tests/test_architecture.py) にある
+（`import fiftyone` の場所、画素I/Oの場所、`checks/` の純粋性、
+元JSON形式の知識の場所、`core/` が matplotlib を引かないこと）。
+docstring の約束は破られても気づけないので、守りたいものはここへ足す。
 
 ### コマンド一覧
 
