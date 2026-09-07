@@ -237,6 +237,9 @@ uv run pytest -m 'realdata or fiftyone'   # 全部
 
 ## 3. 手順 — 上から順に実行する
 
+> コマンドラインで1つずつ打つ代わりに [notebooks/pipeline.ipynb](notebooks/pipeline.ipynb) から
+> セル実行することもできる（`uv sync --group notebook` が必要）。内容はこの3章と同じ。
+
 ### 3.1 対象を確認する
 
 ```bash

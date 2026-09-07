@@ -99,6 +99,8 @@ def build_manifest(
         file_issues = issues_by_file.get(group.file_uid, [])
 
         annotations: list[ManifestAnnotation] = []
+        # D03/D04 の重複相手は同じ画像内にしかいないので、group内だけで完結する。
+        records_by_uid = {r.geometry_uid: r for r in group.records}
         for record in group.records:
             box = asset.boxes.get(record.geometry_uid)
             if box is None:
@@ -129,6 +131,7 @@ def build_manifest(
                     attributes={
                         **_attributes(record, decision),
                         **_display_note(asset.adjusted.get(record.geometry_uid)),
+                        **_duplicate_hint(record, decision, records_by_uid),
                     },
                     issues=[_issue_row(i) for i in found],
                 )
@@ -227,6 +230,28 @@ def _display_note(adjusted: dict[str, Any] | None) -> dict[str, Any]:
         "display_adjusted": adjusted.get("reason", ""),
         "original_bbox": str(adjusted.get("original_bbox", "")),
     }
+
+
+def _duplicate_hint(
+    record: Any,
+    decision: SelectionDecision | None,
+    records_by_uid: Mapping[str, Any],
+) -> dict[str, Any]:
+    """重複ペアの相手と timestamp を比べ、どちらが新しいか目視の参考として出す。
+
+    D01（``selection/automatic.py``）と同じ基準: 欠損・同値・比較不能なら
+    判定しない。あくまで人間の判断材料であり、ここで採否を決めるわけではない。
+    """
+    if decision is None or decision.related_geometry_uid is None:
+        return {}
+    partner = records_by_uid.get(decision.related_geometry_uid)
+    if partner is None:
+        return {}
+    own_ts = record.parsed_timestamp
+    partner_ts = partner.parsed_timestamp
+    if own_ts is None or partner_ts is None or own_ts == partner_ts:
+        return {"newer_in_pair": None}
+    return {"newer_in_pair": own_ts > partner_ts}
 
 
 def _attributes(record: Any, decision: SelectionDecision | None) -> dict[str, Any]:

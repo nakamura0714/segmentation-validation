@@ -10,7 +10,7 @@ annotation も ``keep`` として必ず1行出す。
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, Iterable, Mapping
 
@@ -243,11 +243,20 @@ def build_decisions(
     severity: dict[str, str] = {}
     review_flag: dict[str, bool] = {}
     counts: dict[str, int] = {}
+    # D01以外（D03/D04）は自動判定を持たないので、重複の対応関係はIssue側からしか
+    # 拾えない。ここで拾っておき、automaticが無い場合のフォールバックに使う。
+    duplicate_group: dict[str, str] = {}
+    related: dict[str, str] = {}
 
     for issue in issues:
         uid = issue.geometry_uid
         if uid is None:
             continue
+
+        if issue.duplicate_group_id is not None:
+            duplicate_group.setdefault(uid, issue.duplicate_group_id)
+        if issue.related_geometry_uids:
+            related.setdefault(uid, issue.related_geometry_uids[0])
 
         if effective_review_required(issue.check_id, issue.status, config):
             review_flag[uid] = True
@@ -326,14 +335,41 @@ def build_decisions(
                 reason=reason,
                 decision_source=source,
                 overrides_automatic=overrides,
-                related_geometry_uid=auto.related_geometry_uid if auto else None,
+                related_geometry_uid=(auto.related_geometry_uid if auto else None)
+                or related.get(uid),
                 kept_geometry_uid=auto.kept_geometry_uid if auto else None,
-                duplicate_group_id=auto.duplicate_group_id if auto else None,
+                duplicate_group_id=(auto.duplicate_group_id if auto else None)
+                or duplicate_group.get(uid),
                 reviewer=verdict.reviewer if verdict else None,
                 reviewed_at=verdict.reviewed_at if verdict else None,
                 comment=verdict.comment if verdict else None,
             )
         )
+    return _fill_kept_geometry_uid(decisions)
+
+
+def _fill_kept_geometry_uid(
+    decisions: list[SelectionDecision],
+) -> list[SelectionDecision]:
+    """D03/D04 など、自動判定を持たない重複グループについて、目視で採否が
+    確定した後の ``kept_geometry_uid`` を埋める。
+
+    D01（自動判定）は ``build_decisions`` 本体で既に埋まっているのでここでは
+    上書きしない。グループ内で ``keep`` がちょうど1件のときだけ確定させる
+    （0件=まだ未決着、2件以上=想定外の構成）。曖昧な場合は None のまま残す。
+    """
+    by_group: dict[str, list[int]] = {}
+    for i, d in enumerate(decisions):
+        if d.duplicate_group_id is not None and d.kept_geometry_uid is None:
+            by_group.setdefault(d.duplicate_group_id, []).append(i)
+
+    for indices in by_group.values():
+        keepers = [i for i in indices if decisions[i].final_decision is Decision.KEEP]
+        if len(keepers) != 1:
+            continue
+        kept_uid = decisions[keepers[0]].geometry_uid
+        for i in indices:
+            decisions[i] = replace(decisions[i], kept_geometry_uid=kept_uid)
     return decisions
 
 

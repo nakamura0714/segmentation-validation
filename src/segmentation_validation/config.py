@@ -39,21 +39,21 @@ class DatasetsConfig:
 class ValidationConfig:
     """検証の対象範囲。
 
-    ``target_labels`` が空なら**全病変を検証する**（既定）。
-    絞る場合はラベルを列挙する。同一性は ``(code_system, code)`` で判断するので
-    ``"Findings/010"`` が正式な書き方だが、``"pneumothorax"``（code_text_eng）でも
-    指定できる。``code_text`` は表記揺れがあるので受け付けない
+    **既定は気胸のみ**（``target_labels: ["Findings/010"]``）。全病変を検証したい
+    ときは ``target_labels: []`` を明示する。同一性は ``(code_system, code)`` で
+    判断するので ``"Findings/010"`` が正式な書き方だが、``"pneumothorax"``
+    （code_text_eng）でも指定できる。``code_text`` は表記揺れがあるので受け付けない
     （実測で ``Findings/010`` に「気胸（塗りつぶし）」と「気胸（縁取り）」が混在）。
 
     対象外の annotation はチェックを一切走らせず、採否マスタに
     ``reason = out_of_scope`` として1行残す。黙って ``no_issue_detected`` に
     混ぜない —— 「検証して問題なし」と「検証対象外」は別物。
 
-    例: 気胸だけを検証する
-        "target_labels": ["Findings/010"]
+    例: 全病変を検証する
+        "target_labels": []
     """
 
-    target_labels: list[str] = field(default_factory=list)
+    target_labels: list[str] = field(default_factory=lambda: ["Findings/010"])
 
 
 @dataclass(frozen=True)

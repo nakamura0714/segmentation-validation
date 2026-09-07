@@ -29,6 +29,7 @@ from segmentation_validation.checks.base import Severity
 from segmentation_validation.config import Config
 from segmentation_validation.review.export_assets import AssetPaths
 from segmentation_validation.review.manifest import build_manifest, write_manifest
+from segmentation_validation.review.review_schema import SCHEMA_SEED_TAG
 from segmentation_validation.selection.decisions import (
     Decision,
     build_decisions,
@@ -135,11 +136,16 @@ def built(review_config, synthetic):
 # --------------------------------------------------------------- 構築
 
 
+def _real_samples(built):
+    """候補値シード（``SCHEMA_SEED_TAG``）を除いた、本物のSampleだけを返す。"""
+    return [sample for sample in built if SCHEMA_SEED_TAG not in sample.tags]
+
+
 def test_マスクの無いbboxもdatasetに載る(built, synthetic):
     """★過去に11件が manifest から落ちていた。座標そのものが目視対象。"""
     uids = {
         det["geometry_uid"]
-        for sample in built
+        for sample in _real_samples(built)
         for det in (sample["final"].detections if sample["final"] else [])
     }
     assert uids == {"A", "B", "C"}
@@ -148,13 +154,15 @@ def test_マスクの無いbboxもdatasetに載る(built, synthetic):
 def test_目視待ちの件数が採否マスタと一致する(built):
     pending = [
         det
-        for sample in built
+        for sample in _real_samples(built)
         for det in (sample["final"].detections if sample["final"] else [])
         if det["review_status"] == Decision.PENDING.value
     ]
     assert [d["geometry_uid"] for d in pending] == ["A"]
 
-    pending_images = [s for s in built if s["review_status"] == Decision.PENDING.value]
+    pending_images = [
+        s for s in _real_samples(built) if s["review_status"] == Decision.PENDING.value
+    ]
     assert [s["file_id"] for s in pending_images] == ["F2"]
 
 
@@ -170,7 +178,8 @@ def test_autoタグが貼られる(built):
 
 def test_保存ビューが全部作られる(built):
     """★日本語だけの名前は slug 化で失敗する。ASCII 名であること。"""
-    assert len(built.list_saved_views()) == 6
+    # 6つの目視ビュー + 0-all-real（シード除外の入口）+ 7-flagged-for-report。
+    assert len(built.list_saved_views()) == 8
 
 
 # --------------------------------------------------------------- 往復

@@ -91,6 +91,22 @@ SUGGESTED_REASONS = {
     ),
 }
 
+#: keep/exclude を問わず候補として出す1本の並び。FiftyOne Appの入力候補は
+#: 実データに存在する値しか出せない（宣言的な choices/classes はApp側から
+#: 一切参照されない。実機検証済み）ので、``fiftyone_builder.py`` がこれを
+#: 使って捨てSample/Detectionを作り、値を実在させる。
+ALL_SUGGESTED_REASONS: tuple[str, ...] = tuple(
+    dict.fromkeys(SUGGESTED_REASONS["keep"] + SUGGESTED_REASONS["exclude"])
+)
+
+#: 候補値を実在させるためだけの捨てSample/Detectionに付く目印タグ。
+#: export/import・保存ビュー・件数集計はこのタグを見て必ず除外する。
+SCHEMA_SEED_TAG = "system:schema_seed"
+
+#: 検証対象外のannotationで気になるものを見つけたとき、人間が付けるタグ。
+#: auto:/review: とは別の名前空間にして、機械判定・人間の採否判定と混ざらないようにする。
+FLAG_NEEDS_REPORT = "flag:needs_report"
+
 
 def auto_tag(check_id: str) -> str:
     """check_id から機械のタグを作る。

@@ -21,6 +21,7 @@ from typing import Any
 
 from ..config import Config
 from .review_schema import (
+    ALL_SUGGESTED_REASONS,
     FIELD_BAND,
     FIELD_FINAL,
     FIELD_REVIEW_COMMENT,
@@ -28,6 +29,8 @@ from .review_schema import (
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
+    FLAG_NEEDS_REPORT,
+    SCHEMA_SEED_TAG,
     ReviewStatusTag,
     review_tag,
 )
@@ -123,6 +126,9 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
         sample[FIELD_FINAL] = fo.Detections(detections=detections)
         samples.append(sample)
 
+    if manifest["images"]:
+        samples.extend(_seed_choice_candidates(manifest["images"][0]["filepath"]))
+
     dataset.add_samples(samples)
     _save_views(dataset, config)
     logger.info(
@@ -132,6 +138,55 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
         dataset.count(f"{FIELD_FINAL}.detections"),
     )
     return dataset
+
+
+def _seed_choice_candidates(reference_filepath: str) -> list:
+    """review_status / review_reason の全候補値を、FiftyOne App の値編集ボックスの
+    候補（サジェスト）として実在させるためだけの捨てSample群。
+
+    FiftyOne 1.21 の App は候補値を MongoDB の distinct() をその場で引いて出す
+    （``dataset.classes`` はアノテーション連携（CVAT等）専用でApp からは一切
+    参照されず、``StringField(choices=...)`` もAppからは無視されることを実機で
+    確認済み）。つまり「一度も出たことのない値」は宣言では出せず、実データとして
+    最低1回存在させる以外に方法が無い。``uncertain`` や ``SUGGESTED_REASONS`` は
+    人間しか付けない値なので、目視前は実データにまだ一度も現れない。
+
+    ``SCHEMA_SEED_TAG`` を付け、``file_uid`` / ``geometry_uid`` / ``reviewer`` は
+    意図的に設定しない。これにより ``export_decisions`` / ``import_decisions`` は
+    変更なしでこの捨て行を無視する（geometry_uid が無い Detection はスキップされ、
+    Sample も reviewer 未入力かつ manifest に無い file_uid なら人間の判定と見なされない）。
+    ``_save_views`` / ``dataset_summary`` 側で ``SCHEMA_SEED_TAG`` を除外して集計する。
+    """
+    import fiftyone as fo
+
+    statuses = list(ReviewStatusTag)
+    reasons = ALL_SUGGESTED_REASONS
+    n = max(len(statuses), len(reasons))
+
+    seeds = []
+    for i in range(n):
+        status = statuses[i % len(statuses)].value
+        reason = reasons[i % len(reasons)]
+
+        # flag:needs_report も同じ理由で候補に出ないので、シードのついでに1回だけ実在させる。
+        extra_tags = [FLAG_NEEDS_REPORT] if i == 0 else []
+
+        sample = fo.Sample(
+            filepath=reference_filepath, tags=[SCHEMA_SEED_TAG, *extra_tags]
+        )
+        sample[FIELD_REVIEW_STATUS] = status
+        sample[FIELD_REVIEW_REASON] = reason
+
+        detection = fo.Detection(
+            label="__schema_seed__", bounding_box=[0.0, 0.0, 0.001, 0.001]
+        )
+        detection.tags = [SCHEMA_SEED_TAG, *extra_tags]
+        detection[FIELD_REVIEW_STATUS] = status
+        detection[FIELD_REVIEW_REASON] = reason
+        sample[FIELD_FINAL] = fo.Detections(detections=[detection])
+        seeds.append(sample)
+
+    return seeds
 
 
 def _save_views(dataset, config: Config) -> None:
@@ -144,6 +199,9 @@ def _save_views(dataset, config: Config) -> None:
     from fiftyone import ViewField as F
 
     pending = ReviewStatusTag.PENDING.value
+    # 候補値を出すためだけの捨てSample/Detection（SCHEMA_SEED_TAG）は、
+    # どの保存ビューにも・件数集計にも出してはいけない。
+    base = dataset.match(~F("tags").contains(SCHEMA_SEED_TAG))
 
     def save(name: str, view, description: str) -> None:
         try:
@@ -153,23 +211,28 @@ def _save_views(dataset, config: Config) -> None:
             logger.warning("保存ビューを作れない %s: %s", name, error)
 
     save(
+        "0-all-real",
+        base,
+        "候補シード（system:schema_seed）を除いた全件。目視対象以外も見たいときの入口",
+    )
+    save(
         "1-pending-annotations",
-        dataset.filter_labels(FIELD_FINAL, F(FIELD_REVIEW_STATUS) == pending),
+        base.filter_labels(FIELD_FINAL, F(FIELD_REVIEW_STATUS) == pending),
         "目視待ちの annotation だけを残した Detection ビュー",
     )
     save(
         "2-pending-images",
-        dataset.match(F(FIELD_REVIEW_STATUS) == pending),
+        base.match(F(FIELD_REVIEW_STATUS) == pending),
         "目視待ちの画像（未アノテーションのビュー）。側面像なら除外が必要",
     )
     save(
         "3-outside-body",
-        dataset.filter_labels(FIELD_FINAL, F("tags").contains("auto:s05_outside_body")),
+        base.filter_labels(FIELD_FINAL, F("tags").contains("auto:s05_outside_body")),
         "体外領域。胸郭の側方バンドからはみ出している annotation",
     )
     save(
         "4-tiny-region",
-        dataset.filter_labels(
+        base.filter_labels(
             FIELD_FINAL,
             F("tags").contains("auto:s03_suspiciously_small")
             | F("tags").contains("auto:s03_tiny_annotation")
@@ -179,15 +242,20 @@ def _save_views(dataset, config: Config) -> None:
     )
     save(
         "5-contained-different-label",
-        dataset.filter_labels(
+        base.filter_labels(
             FIELD_FINAL, F("tags").contains("auto:d04_contained_different_label")
         ),
         "包含された重複（別ラベル）。入れ子の所見として正当な可能性が高い",
     )
     save(
         "6-broken-bbox",
-        dataset.filter_labels(FIELD_FINAL, F("display_adjusted") != None),  # noqa: E711
+        base.filter_labels(FIELD_FINAL, F("display_adjusted") != None),  # noqa: E711
         "座標が壊れている bbox。表示のために枠を広げてある（original_bbox が原座標）",
+    )
+    save(
+        "7-flagged-for-report",
+        base.match(F("tags").contains(FLAG_NEEDS_REPORT)),
+        "検証対象外だが気になったannotation/画像。データ管理担当への報告用",
     )
     logger.info("保存ビュー: %s", dataset.list_saved_views())
 
@@ -201,16 +269,19 @@ def dataset_summary(config: Config) -> dict[str, Any]:
     if name not in fo.list_datasets():
         return {}
     dataset = fo.load_dataset(name)
+    from fiftyone import ViewField as F
+
+    real = dataset.match(~F("tags").contains(SCHEMA_SEED_TAG))
     return {
         "name": name,
-        "n_samples": len(dataset),
-        "n_detections": dataset.count(f"{FIELD_FINAL}.detections"),
-        "label_tags": dataset.count_label_tags(),
-        "sample_tags": dataset.count_sample_tags(),
-        "annotation_status": dataset.count_values(
+        "n_samples": len(real),
+        "n_detections": real.count(f"{FIELD_FINAL}.detections"),
+        "label_tags": real.count_label_tags(),
+        "sample_tags": real.count_sample_tags(),
+        "annotation_status": real.count_values(
             f"{FIELD_FINAL}.detections.{FIELD_REVIEW_STATUS}"
         ),
-        "image_status": dataset.count_values(FIELD_REVIEW_STATUS),
+        "image_status": real.count_values(FIELD_REVIEW_STATUS),
     }
 
 
