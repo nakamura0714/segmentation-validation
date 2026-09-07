@@ -314,6 +314,10 @@ M・D・S 系統ごとに開閉できる check 台帳 / annotation の絞り込�
 
 ### 3.6 FiftyOne で目視する
 
+> 実務用の手順書（保存ビューの使い方、候補シード、`newer_in_pair`、GUI確認、
+> データ異常を見つけたときの対応まで）は
+> [docs/review_procedure.md](docs/review_procedure.md) にまとめてある。
+
 ```bash
 export FIFTYONE_DATABASE_DIR="$HOME/.fiftyone/var/lib/mongo"
 
@@ -976,8 +980,8 @@ uv run segmentation-validation --config config/my.json <cmd>
 # 正常例187枚も目視対象に加える（「所見の見落としが無いか」まで確認したいとき）
 --set 'decision_policy.review_image_classes=["unannotated_view","unannotated_orphan","negative_case"]'
 
-# 気胸だけを検証する（対象 915 / 対象外 902、目視 251 → 102、画像 177 → 87枚）
---set 'validation.target_labels=["Findings/010"]'
+# 全病変を検証する（気胸だけの絞り込みが既定なので、外すときに指定する）
+--set 'validation.target_labels=[]'
 
 # 微小領域の閾値
 --set thresholds.tiny_annotation_mm2=15
@@ -990,7 +994,11 @@ uv run segmentation-validation --config config/my.json <cmd>
 # 体外領域のマージン
 --set reference_masks.margin_mm=15
 
-# 対象JSONを絞る（新しいJSONの追加も config の1行）
+# 対象JSONを絞る・除外する
+# 新しいデータセットの追加そのものは config 変更不要。
+# datasets.sources は既定で `dataset/source/*.json` という glob なので、
+# 新しい engineer-set JSON を dataset/source/ にシンボリックリンクするだけで
+# 次回 scan から自動的に対象へ入る。config を触るのは絞り込み・除外したいときだけ。
 --set 'datasets.exclude=["01272"]'
 --set 'datasets.sources=["../../../dataset/source/*1298*.json"]'
 
@@ -1012,9 +1020,25 @@ uv run segmentation-validation --config config/my.json <cmd>
 
 ### 検証対象の病変を絞る
 
-同一性は `(code_system, code)` なので `"Findings/010"` が正式な書き方。
-`"pneumothorax"`（`code_text_eng`）でも指定できるが、`code_text` は表記揺れがあるので
-受け付けない（`Findings/010` に「気胸（塗りつぶし）」294件と「気胸（縁取り）」1件が混在）。
+**`code_text_eng`（例: `"pneumothorax"`）を使うこと。既定もこれ。**
+
+`"Findings/010"` のような `(code_system, code)` 指定も文法上は使えるが、
+**`(code_system, code)` の割り当てはデータセット（アノテーションツール／プロジェクト）
+ごとに別の対応表を持ち、データセットを跨いで同一性を保証しない**ことが実データで
+確認されている。
+
+| データセット | `Findings/010` の意味 |
+|---|---|
+| `ANN_EIRLPRJ_01272` / `ANN_EIRLPRJ_1298` | 気胸（pneumothorax） |
+| `ANN_EIRLPRJ_01331` / `01333` / `01334` / `01336` | 結節性陰影（nodule）。気胸は `Findings/001` |
+
+つまり `target_labels=["Findings/010"]` は一部のデータセットでは気胸を正しく拾うが、
+別のデータセットでは**結節性陰影を拾い、気胸を取りこぼす**。`code_text_eng` は
+全データセットを横断して表記ゆれが無く（`code_text` の日本語表記が複数あっても
+`code_text_eng` は必ず `"pneumothorax"` に統一される。実測で
+「気胸（塗りつぶし）」「気胸（縁取り）」の2表記があるが両方とも `pneumothorax`）、
+ツール非依存で唯一正しい指定方法。`code_text`（日本語表記そのもの）は表記揺れが
+あるので受け付けない。
 
 - **対象内は全件検証する**（部分的に検証しない）
 - **対象外はチェックを一切走らせず**、`reason = out_of_scope` として1行残す。

@@ -1,0 +1,250 @@
+# 目視レビュー・GUI確認 手順書
+
+チェック・採否確定の詳しい仕組みは [README.md](../README.md) を参照。
+このドキュメントは「実際に目視レビューとGUI確認を行うときに何を押すか」だけに絞った
+実務用の手順書。コマンドをセルに分けて実行したいなら
+[notebooks/pipeline.ipynb](../notebooks/pipeline.ipynb) から進めてもよい
+（内容はこの手順書と同じ）。
+
+---
+
+## 0. 前提
+
+```bash
+cd /mnt/project/chest/metry/pi6/work/nakamura/segmentation-validation
+uv sync --group review   # fiftyone 一式（目視レビューまでやる場合。README 2章）
+export FIFTYONE_DATABASE_DIR="$HOME/.fiftyone/var/lib/mongo"   # 毎回打つのが面倒なら ~/.bashrc へ
+```
+
+## 1. パイプラインを流す
+
+```bash
+uv run segmentation-validation scan --jobs 8   # 初回2〜3分。2回目以降は数秒
+uv run segmentation-validation check
+uv run segmentation-validation select
+```
+
+`select`実行後に出る警告を必ず読む。
+
+- `pending=N が残っている` → 2章のFiftyOneで目視する
+- `geometry_uid の重複がある`（AssertionError） → [5. データセットに異常が見つかったら](#5-データセットに異常が見つかったら) へ
+
+## 2. FiftyOneで目視する
+
+```bash
+uv run segmentation-validation review build     # 目視対象の画像を書き出す（初回6〜9分）
+uv run segmentation-validation review launch    # http://localhost:5151 でApp起動
+```
+
+手元のPCから見る（ブラウザで`http://localhost:5151`を開く）。VS Code Remoteなら
+「ポート」パネルで転送、それ以外なら新しいターミナルで
+`ssh -L 5151:localhost:5151 <本サーバー>`。詳細はREADME 3.6。
+
+### 2.1 保存ビュー（左サイドバー）
+
+| ビュー | 内容 |
+|---|---|
+| `0-all-real` | 候補シード（後述）を除いた全件。目視対象以外も見たいときの入口 |
+| `1-pending-annotations` | 目視待ちのannotation |
+| `2-pending-images` | 目視待ちの画像（未アノテーションのビュー） |
+| `3-outside-body` | 体外領域（S05） |
+| `4-tiny-region` | 微小領域（S03） |
+| `5-contained-different-label` | 包含された重複・別ラベル（D04） |
+| `6-broken-bbox` | 座標が壊れているbbox |
+| `7-flagged-for-report` | 目視中に気になった（`flag:needs_report`タグを付けた）annotation/画像 |
+
+### 2.2 判定の入力
+
+annotationを選択 → 属性パネルで以下を入力する。
+
+| フィールド | 値 |
+|---|---|
+| `review_status` | `keep` / `exclude` / `uncertain` |
+| `review_reason` | 自由記述。候補に `visually_valid` / `invalid_annotation` / `outside_body` 等が出る |
+| `reviewer` | 自分のメールアドレス |
+| `review_comment` | 補足コメント（任意） |
+
+画像自体の採否（未アノテーションのビューが側面像かどうか）はSample側の同名フィールドに入力する。
+
+**`pending` と `uncertain` の違い**: `pending`は「まだ見ていない」、`uncertain`は
+「見たが自分では判断できない（Drに要相談等）」。判断できないものは`pending`のまま
+放置せず`uncertain`にする。理由は2つ:
+
+1. 「誰も見ていない」と「見たが判断できない」を後から区別できるようにするため
+2. `precision.md`の集計は「目視済（exclude + keep + uncertain）」を分母にするため。
+   `pending`のままだと目視した実績としてカウントされない
+
+`uncertain`は候補一覧にも出る（下記「候補シード」参照）。ドロップダウンから選ぶことは
+できるが、**FiftyOne標準の入力欄は自由入力もできてしまう**（候補以外を防ぐ強制力は無い）。
+候補にない値を打っても保存はされるので、綴りミスに注意する。
+
+### 2.3 重複ペアの「どちらが新しいか」
+
+D03/D04（近似重複・包含重複）のannotationには`newer_in_pair`属性が付く
+（`true`=ペア相手より新しい、`false`=古い、`None`=timestampが同値・欠損で比較不能）。
+「原則、新しい方を採用する」という方針の判断材料として使う。ただし最終判断は目視で
+行うこと（作業ミスに見える画像はそのまま新しい方を採用しない）。
+
+### 2.4 対象外のannotationで気になるものを見つけたら
+
+このツールの検証対象は既定で気胸のみ（`validation.target_labels`）。対象外の
+annotationで明らかにおかしいものを偶然見つけた場合は、`flag:needs_report`タグを
+付けておく（タグ入力欄の候補に出る）。後で保存ビュー`7-flagged-for-report`を開けば
+まとめて拾えるので、`institution`/`patient_id`/`file_id`等の属性と一緒に
+データ管理担当へ報告する。
+
+### 2.5 候補シードについて
+
+`review_status`の`uncertain`や`review_reason`の推奨値は、目視前は実データに
+1件も存在しないため、何もしないとFiftyOne Appの候補一覧に出てこない
+（FiftyOne 1.21のAppは実データの値をその場で拾って候補にするだけで、
+`choices`のような宣言的な候補リストは一切見ない。実機検証済み）。
+これを解消するため、`review build`は候補値を実在させるためだけの捨てSample/Detection
+（`system:schema_seed`タグ付き、ラベル`__schema_seed__`）を11件追加している。
+保存ビュー・`review status`・`review export`はすべてこの捨て行を自動的に除外するので、
+目視作業では意識しなくてよい（保存ビュー`0-all-real`を使えば最初から見えない）。
+
+## 3. 判定を採否へ反映する
+
+```bash
+uv run segmentation-validation review export    # review_decisions.json / .csv
+uv run segmentation-validation select           # 採否へ反映（pending が減る）
+uv run segmentation-validation review status    # 進捗確認
+uv run segmentation-validation review precision # 自動ルールの答え合わせ
+```
+
+`review launch → 目視 → review export → select → review status` を pending が
+0になるまで繰り返す。
+
+### DBを作り直した後（`review build`をもう一度実行する前）
+
+```bash
+uv run segmentation-validation review export    # ★先に必ず export（消える前に書き出す）
+uv run segmentation-validation review build      # DB再構築
+uv run segmentation-validation review import     # review_decisions.json から判定を復元
+```
+
+## 4. ダッシュボードGUIで確認する
+
+```bash
+uv run segmentation-validation report   # summary.md
+uv run segmentation-validation gui      # dashboard.html
+```
+
+`dashboard.html`は`output/validation/<fingerprint>/`に生成される単一HTML。
+ブラウザで直接開けば見られる（サーバー不要）。手元のブラウザから開くには、
+本サーバー上で軽量HTTPサーバーを立ててポート転送する。
+
+```bash
+cd output/validation/<fingerprint>
+uv run python -m http.server 8899 --bind 127.0.0.1
+```
+
+手元PCの新しいターミナルで（または`~/.ssh/config`に`LocalForward`を書いておく）:
+
+```bash
+ssh -L 8899:localhost:8899 <本サーバー>
+```
+
+ブラウザで`http://localhost:8899/dashboard.html`を開く。ノートブックから開く場合は
+[notebooks/pipeline.ipynb](../notebooks/pipeline.ipynb) の3.5節にこのサーバー起動を
+セル化してある。
+
+ダッシュボードで確認できるもの: 採否の流れ（症例数つき）/ check別のpending /
+面積分布と閾値 / 体外領域の裾50点 / M・D・S系統ごとの check台帳 /
+annotationの絞り込み表。**最終的な合否（annotation単位のkeep/exclude/pending）は
+ここで一覧できる**。
+
+## 5. データセットに異常が見つかったら
+
+### 5.1 一時的に対象から外す
+
+`select`が特定のデータセットのせいで壊れる、または明らかにおかしい場合、
+`datasets.exclude`でファイル名の部分一致により一時的に除外できる
+（コード変更不要）。
+
+```bash
+uv run segmentation-validation --set 'datasets.exclude=["01331","01333","01334","01336","PTE_CX_MT_PI3","PTR_CX_MT_PI3"]' select
+```
+
+除外は暫定処置。原因がデータ側にある場合はデータ管理担当に報告し、
+修正版が来たら`datasets.exclude`を外して再検証する。
+
+### 5.2 `geometry_uid の重複がある` で `select` が落ちたら
+
+`geometry_uid`は全データセットを跨いで一意という前提でこのツールは組まれている
+（README 4章）。複数データセットに同一annotationが重複して存在すると壊れる。
+原因を特定する手順（読み取り専用。`uv run python -c "..."`で十分、コード変更は不要）:
+
+```python
+from segmentation_validation.config import load_config
+from segmentation_validation.cli import _load_context
+import collections
+
+config = load_config(None, [])
+ctx = _load_context(config)
+records = list(ctx.records) + list(ctx.out_of_scope)
+
+by_uid = collections.defaultdict(list)
+for r in records:
+    by_uid[r.geometry_uid].append(r)
+dupes = {uid: rs for uid, rs in by_uid.items() if len(rs) > 1}
+
+print("重複しているgeometry_uidの数:", len(dupes))
+# どのデータセットの組み合わせで重複しているか
+combo_counts = collections.Counter(
+    tuple(sorted(r.dataset_id for r in rs)) for rs in dupes.values()
+)
+for combo, n in combo_counts.most_common():
+    print(n, combo)
+```
+
+`patient_id` / `path_mask` などのフィールドまで全部一致していれば、
+同一annotationの二重エクスポート（データ管理側のバグの可能性が高い）。
+[2026-09実例](#2026-09-実例-pteptrの二重エクスポート) を参考に、
+影響範囲（患者数・annotation数）を添えて報告する。
+
+### 5.3 未アノテーション画像が異常に多いとき
+
+`image_class`（annotated / negative_case / unannotated_view / unannotated_orphan）を
+データセット単位で集計すると、性質の違うデータセットが混ざっていないか分かる
+（`unannotated_orphan`は本来ほぼ0件のはずの区分）。
+
+```python
+from segmentation_validation.config import load_config
+from segmentation_validation.cli import _load_context
+from segmentation_validation.selection.image_decisions import build_image_decisions
+from segmentation_validation.checks import ALL_CHECKS
+import collections
+
+config = load_config(None, [])
+ctx = _load_context(config)
+issues = [i for check in ALL_CHECKS for i in check.run(ctx)]
+image_decisions = build_image_decisions(ctx.groups, issues, config)
+
+by_dataset = collections.defaultdict(collections.Counter)
+for d in image_decisions:
+    by_dataset[d.dataset_id][d.image_class] += 1
+for ds, counter in sorted(by_dataset.items()):
+    print(ds, dict(counter))
+```
+
+`institution`まで割ると、公開データセット（Kaggle等）由来の画像が意図せず
+大量に混ざっていないかも確認できる。
+
+### 2026-09 実例: PTE/PTRの二重エクスポート
+
+参考として、実際に遭遇した事例を残す。
+
+- `PTE_CX_MT_PI3_pneumothorax`（テスト用のはず）と`PTR_CX_MT_PI3_pneumothorax`
+  （学習用のはず）が、`dataset_id`以外の全フィールド（`patient_id`/`study`/`series`/
+  `image_path`/`path_mask`/`code`/`timestamp`等）が完全一致するannotationを271件、
+  さらにそのうち85件は既存の`ETR_ChestMetry_PI6px_with_mask136`とも重複していた
+- train/testが排他になっているべきところ完全一致していたため、
+  エクスポート処理側のバグと判断してデータ管理担当へ報告し、
+  修正を待つ間は`datasets.exclude`で両方とも一時的に除外して進めた
+- 別途、新規追加された`ANN_EIRLPRJ_01331/01333/01334/01336`は
+  `institution=kaggle_pneumothorax`（公開データセット由来）の画像を大量に含み、
+  そのうち`annotations: []`（未アノテーション）の画像が77〜84%を占めていた。
+  「陰性所見」を意味するラベルは付いておらず、目視だけでは陰性なのか
+  単に未着手なのか判別できなかったため、こちらもデータ管理側に確認を依頼した

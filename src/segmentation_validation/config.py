@@ -39,11 +39,18 @@ class DatasetsConfig:
 class ValidationConfig:
     """検証の対象範囲。
 
-    **既定は気胸のみ**（``target_labels: ["Findings/010"]``）。全病変を検証したい
-    ときは ``target_labels: []`` を明示する。同一性は ``(code_system, code)`` で
-    判断するので ``"Findings/010"`` が正式な書き方だが、``"pneumothorax"``
-    （code_text_eng）でも指定できる。``code_text`` は表記揺れがあるので受け付けない
-    （実測で ``Findings/010`` に「気胸（塗りつぶし）」と「気胸（縁取り）」が混在）。
+    **既定は気胸のみ**（``target_labels: ["pneumothorax"]``）。全病変を検証したい
+    ときは ``target_labels: []`` を明示する。
+
+    指定方法は2通りだが、**``code_text_eng``（例: ``"pneumothorax"``）を使うこと**。
+    ``"Findings/010"`` のような ``(code_system, code)`` 指定も文法上は使えるが、
+    ``(code_system, code)`` の割り当ては**データセット（アノテーションツール／
+    プロジェクト）ごとに別の対応表を持ち、データセットを跨いで同一性を保証しない**
+    ことが実データで確認されている（例: ``Findings/010`` は一部のデータセットでは
+    気胸だが、別のデータセットでは結節性陰影で、そちらでは気胸は ``Findings/001``）。
+    ``code_text_eng`` は全データセットを横断して表記ゆれが無く
+    （``code_text`` の日本語表記が複数あっても ``code_text_eng`` は
+    ``"pneumothorax"`` に統一される）、ツール非依存で唯一正しい指定方法。
 
     対象外の annotation はチェックを一切走らせず、採否マスタに
     ``reason = out_of_scope`` として1行残す。黙って ``no_issue_detected`` に
@@ -53,7 +60,7 @@ class ValidationConfig:
         "target_labels": []
     """
 
-    target_labels: list[str] = field(default_factory=lambda: ["Findings/010"])
+    target_labels: list[str] = field(default_factory=lambda: ["pneumothorax"])
 
 
 @dataclass(frozen=True)

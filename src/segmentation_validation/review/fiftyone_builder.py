@@ -152,10 +152,14 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
     人間しか付けない値なので、目視前は実データにまだ一度も現れない。
 
     ``SCHEMA_SEED_TAG`` を付け、``file_uid`` / ``geometry_uid`` / ``reviewer`` は
-    意図的に設定しない。これにより ``export_decisions`` / ``import_decisions`` は
-    変更なしでこの捨て行を無視する（geometry_uid が無い Detection はスキップされ、
-    Sample も reviewer 未入力かつ manifest に無い file_uid なら人間の判定と見なされない）。
-    ``_save_views`` / ``dataset_summary`` 側で ``SCHEMA_SEED_TAG`` を除外して集計する。
+    空文字にする（**未設定のままにはしない**）。``reviewer``未入力かつmanifestに無い
+    ``file_uid``なら人間の判定と見なされないので export/import からは無視されるが、
+    それは``get_field()``が値を返せる場合の話。FiftyOneの``Document.get_field()``は
+    ``getattr(self, field_name)``の薄いラッパーで、その**インスタンスに一度も
+    設定したことのない動的属性**に対しては``None``ではなく``AttributeError``を
+    投げる（実機で確認済み）。空文字を明示しておけば`if not uid: continue`のような
+    既存の防御がそのまま効く。``_save_views`` / ``dataset_summary`` 側では
+    ``SCHEMA_SEED_TAG`` を除外して集計する。
     """
     import fiftyone as fo
 
@@ -174,6 +178,7 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
         sample = fo.Sample(
             filepath=reference_filepath, tags=[SCHEMA_SEED_TAG, *extra_tags]
         )
+        sample["file_uid"] = ""
         sample[FIELD_REVIEW_STATUS] = status
         sample[FIELD_REVIEW_REASON] = reason
 
@@ -181,6 +186,7 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
             label="__schema_seed__", bounding_box=[0.0, 0.0, 0.001, 0.001]
         )
         detection.tags = [SCHEMA_SEED_TAG, *extra_tags]
+        detection["geometry_uid"] = ""
         detection[FIELD_REVIEW_STATUS] = status
         detection[FIELD_REVIEW_REASON] = reason
         sample[FIELD_FINAL] = fo.Detections(detections=[detection])
