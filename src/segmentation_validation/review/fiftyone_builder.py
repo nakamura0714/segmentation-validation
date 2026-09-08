@@ -231,9 +231,13 @@ def _save_views(dataset, config: Config) -> None:
     from fiftyone import ViewField as F
 
     pending = ReviewStatusTag.PENDING.value
-    # 候補値を出すためだけの捨てSample/Detection（SCHEMA_SEED_TAG）は、
-    # どの保存ビューにも・件数集計にも出してはいけない。
-    base = dataset.match(~F("tags").contains(SCHEMA_SEED_TAG))
+    # 以前はここで SCHEMA_SEED_TAG を除外していたが、それだと保存ビュー経由では
+    # _seed_choice_candidates() が実在させた候補値（review_status / review_reason /
+    # flag:needs_report）が一度も見えず、実データの多様性が失われた瞬間に
+    # 選択式が事実上の自由入力に見えてしまう（画像のkeep/exclude判定が消えた際に発生）。
+    # 件数集計（dataset_summary）は別途 real 変数で除外しているので、
+    # ここでシードを混ぜても集計・review export/import の正しさには影響しない。
+    base = dataset
 
     def save(name: str, view, description: str) -> None:
         try:
@@ -245,17 +249,20 @@ def _save_views(dataset, config: Config) -> None:
     save(
         "0-all-real",
         base,
-        "候補シード（system:schema_seed）を除いた全件。目視対象以外も見たいときの入口",
+        "全件（候補シード system:schema_seed を含む。__schema_seed__ という捨て"
+        "ラベルが数件混ざるが、選択肢を切らさないためなので無視してよい）",
     )
     save(
         "1-pending-annotations",
         base.filter_labels(FIELD_FINAL, F(FIELD_REVIEW_STATUS) == pending),
-        "目視待ちの annotation だけを残した Detection ビュー",
+        "目視待ちの annotation だけを残した Detection ビュー。"
+        "review_status==pending で絞るため候補シードのうち pending 以外は出ない",
     )
     save(
         "2-pending-images",
         base.match(F(FIELD_REVIEW_STATUS) == pending),
-        "目視待ちの画像（未アノテーションのビュー）。側面像なら除外が必要",
+        "目視待ちの画像（未アノテーションのビュー）。側面像なら除外が必要。"
+        "review_status==pending で絞るため候補シードのうち pending 以外は出ない",
     )
     save(
         "3-outside-body",

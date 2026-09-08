@@ -236,6 +236,21 @@ class ReviewConfig:
 
 
 @dataclass(frozen=True)
+class GuiConfig:
+    """ダッシュボードを配信する常駐サーバー（``serve``）の設定。"""
+
+    # SSHトンネル設定を1回書けば使い回せるように固定ポートにしてある
+    # （FiftyOne の 5151 と同じ理由）。README 3.5 / docs/review_procedure.md と同値。
+    port: int = 8899
+    host: str = "127.0.0.1"
+    # ブラウザから更新（HTML再構成 / フル更新）を叩けるようにするか。
+    # false にすると閲覧専用になり、POST は 403 を返す。
+    allow_refresh: bool = True
+    # 更新ジョブ実行中にブラウザが状態を取りに来る間隔。
+    poll_interval_sec: int = 2
+
+
+@dataclass(frozen=True)
 class Config:
     """全設定のルート。"""
 
@@ -247,6 +262,7 @@ class Config:
     thresholds: ThresholdsConfig = field(default_factory=ThresholdsConfig)
     decision_policy: DecisionPolicyConfig = field(default_factory=DecisionPolicyConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
+    gui: GuiConfig = field(default_factory=GuiConfig)
 
     # ------------------------------------------------------------------ paths
     @property

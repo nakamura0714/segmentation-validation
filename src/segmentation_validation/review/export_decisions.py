@@ -146,12 +146,30 @@ def unexported_human_decisions(
 
 
 def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> None:
+    """``rows``（今回スキャンできた人間の判定）を既存ファイルとマージして書く。
+
+    ``review build``（``--all`` 無し）は pending の無い画像/annotationを
+    FiftyOne から除外するため、一度確定した判定が次の ``collect_decisions``
+    のスキャン範囲から外れて見えなくなることがある。見えなくなったからと
+    いって判定が無効になったわけではないので、**上書きしない**。
+    既存ファイルにしか無いキーはそのまま残し、両方にあるキーは今回スキャン
+    した方（＝より新しい状態）を優先する。これでモジュール冒頭の docstring
+    にある不変条件（DB削除→再構築→import で判定が戻る）を rebuild を挟んでも
+    保てる。
+    """
+    merged: dict[tuple[str, str], dict[str, Any]] = {
+        (row["kind"], row["key"]): row for row in _read_existing_rows(path)
+    }
+    for row in rows:
+        merged[(row["kind"], row["key"])] = row
+    all_rows = list(merged.values())
+
     payload = {
         "meta": {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "dataset_name": config.review.dataset_name,
-            "n_annotations": sum(1 for r in rows if r["kind"] == "annotation"),
-            "n_images": sum(1 for r in rows if r["kind"] == "image"),
+            "n_annotations": sum(1 for r in all_rows if r["kind"] == "annotation"),
+            "n_images": sum(1 for r in all_rows if r["kind"] == "image"),
         },
         # ``select`` が読む形。annotation は geometry_uid、画像は file_uid がキー。
         "decisions": [
@@ -163,7 +181,7 @@ def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> N
                 "reviewed_at": r["reviewed_at"],
                 "comment": r["comment"],
             }
-            for r in rows
+            for r in all_rows
             if r["kind"] == "annotation"
         ],
         "image_decisions": [
@@ -175,7 +193,7 @@ def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> N
                 "reviewed_at": r["reviewed_at"],
                 "comment": r["comment"],
             }
-            for r in rows
+            for r in all_rows
             if r["kind"] == "image"
         ],
     }
@@ -186,8 +204,38 @@ def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> N
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=COLUMNS)
         writer.writeheader()
-        for row in rows:
+        for row in all_rows:
             writer.writerow(row)
+
+
+def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
+    """既存の ``review_decisions.json`` を ``collect_decisions`` と同じ行の形へ戻す。
+
+    マージ前提の読み戻しなので、読めない/無い場合は空扱いにする
+    （``_exported_keys`` と同じ防御）。
+    """
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("%s を読めない。既存の判定は無いものとして扱う", path)
+        return []
+
+    def to_row(kind: str, key_field: str, d: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "kind": kind,
+            "key": d[key_field],
+            "decision": d["decision"],
+            "reason": d.get("reason", ""),
+            "reviewer": d.get("reviewer", ""),
+            "reviewed_at": d.get("reviewed_at", ""),
+            "comment": d.get("comment", ""),
+        }
+
+    rows = [to_row("annotation", "geometry_uid", d) for d in payload.get("decisions", [])]
+    rows += [to_row("image", "file_uid", d) for d in payload.get("image_decisions", [])]
+    return rows
 
 
 # ------------------------------------------------------------------ internal

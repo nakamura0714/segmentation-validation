@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -27,6 +28,7 @@ from ..selection.decisions import (
     CaseStatus,
     Decision,
     SelectionDecision,
+    case_status,
     count_case_status,
     count_cases,
     effective_review_required,
@@ -213,6 +215,102 @@ def label_composition(
     }
 
 
+#: 症例状態を数値化する並び。``case_rows`` の ``ST`` 列がこの添字を持つ。
+CASE_STATUSES = [s.value for s in CaseStatus]
+
+
+def case_rows(
+    decisions: Sequence[SelectionDecision],
+    image_decisions: Sequence[Any],
+    inst: _Vocab,
+    ds: _Vocab,
+    reason: _Vocab,
+) -> dict[str, Any]:
+    """患者1人 = 1行。「exclude がどの施設に出ているか」を追えるようにする。
+
+    annotation 単位の表では、1患者が複数 annotation を持つので施設ごとの偏りが
+    読めない。症例（患者）で束ねて exclude 数を持たせる。
+
+    **annotation を持たない患者も行を持つ。** ``selection_decisions`` には1行も
+    現れないが、``image_decisions`` 側で exclude になった画像（実測33枚）は
+    まさに追いたい対象なので、両方を突き合わせて母集団を作る。
+
+    症例状態は :func:`case_status` を使う。ここで再実装すると
+    「1件でも未確定なら症例全体が未確定」という安全側の規則が二重管理になる。
+    """
+    keys: dict[tuple[str, str], None] = {}
+    by_case: dict[tuple[str, str], list[SelectionDecision]] = {}
+    for d in decisions:
+        key = (d.dataset_id, d.patient_id)
+        keys.setdefault(key, None)
+        by_case.setdefault(key, []).append(d)
+
+    images_by_case: dict[tuple[str, str], list[Any]] = {}
+    for image in image_decisions:
+        key = (image.dataset_id, image.patient_id)
+        keys.setdefault(key, None)
+        images_by_case.setdefault(key, []).append(image)
+
+    rows: list[list[Any]] = []
+    for dataset_id, patient_id in keys:
+        members = by_case.get((dataset_id, patient_id), [])
+        images = images_by_case.get((dataset_id, patient_id), [])
+
+        counts = Counter(d.final_decision.value for d in members)
+        image_counts = Counter(i.final_decision.value for i in images)
+        # 施設は study の属性だが、実データでは1患者が施設を跨がない。
+        # 跨いだ場合でも施設フィルタが壊れないよう、代表を1つだけ持つ。
+        institutions = sorted(
+            {d.institution for d in members} | {i.institution for i in images}
+        )
+        studies = {d.study for d in members} | {i.study for i in images}
+        files = {d.file_uid for d in members} | {i.file_uid for i in images}
+
+        # 除外理由。同じ理由が何度も出るので集合にしてから並べる。
+        reasons = sorted({d.reason for d in members if d.final_decision is Decision.EXCLUDE})
+        # 目視で追う必要がある画像だけ入れ子で持つ。keep の画像は行数が多く、
+        # 内訳を開いても読めないので載せない（実測 keep 1050 / exclude 33）。
+        flagged = [
+            [
+                i.file_id,
+                i.study,
+                i.image_class_ja,
+                i.final_decision.value,
+                reason(i.reason),
+            ]
+            for i in images
+            if i.final_decision is not Decision.KEEP
+        ]
+
+        rows.append(
+            [
+                patient_id,
+                inst(institutions[0] if institutions else ""),
+                ds(dataset_id),
+                len(studies),
+                len(files),
+                len(members),
+                counts.get("keep", 0),
+                counts.get("exclude", 0),
+                counts.get("pending", 0),
+                counts.get("uncertain", 0),
+                CASE_STATUSES.index(case_status(members).value),
+                [reason(r) for r in reasons],
+                image_counts.get("exclude", 0),
+                image_counts.get("pending", 0) + image_counts.get("uncertain", 0),
+                flagged,
+            ]
+        )
+
+    # exclude が多い順。「どの施設に exclude が出ているか」を先に見せる。
+    rows.sort(key=lambda r: (-(r[7] + r[12]), -r[8], r[0]))
+    return {
+        "rows": rows,
+        "status_order": CASE_STATUSES,
+        "status_labels": {s.value: CASE_STATUS_JA[s] for s in CaseStatus},
+    }
+
+
 def build_payload(
     config: Config,
     issues: Sequence[Issue],
@@ -260,6 +358,9 @@ def build_payload(
         )
 
     inventory = check_inventory(checks, issues, decisions, config)
+    # vocab を伸ばす処理は、``vocab`` を組み立てる前に済ませておく
+    # （``_Vocab.values`` の参照を payload に載せているので順序に依存させたくない）。
+    cases_table = case_rows(decisions, image_decisions, inst, ds, reason)
     thresholds = config.thresholds
     return {
         "meta": {
@@ -318,6 +419,8 @@ def build_payload(
         },
         # 画像単位の採否。annotation を持たない画像はこちらでしか扱えない。
         "images": _image_block(image_decisions),
+        # 症例（患者）単位の一覧。exclude がどの施設に出ているかを追う。
+        "cases_table": cases_table,
         "precision": _precision_block(issues, config),
         "labels": label_composition(decisions, config),
         "checks": inventory,
@@ -414,7 +517,12 @@ def write_dashboard(path: Path, payload: dict[str, Any], config: Config) -> None
         "</script>",
     ]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(parts), encoding="utf-8")
+    # 常駐サーバー（``serve``）が配信中に再構成することがあるので、直接上書きしない。
+    # 700KB の書き込み途中を読まれると、payload が途切れた壊れたHTMLが表示される。
+    # 同じディレクトリに書いてから rename する（同一FS内なので原子的）。
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text("\n".join(parts), encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _dedupe(decisions: Iterable[SelectionDecision]) -> dict[str, int]:
