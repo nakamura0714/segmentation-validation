@@ -24,6 +24,7 @@ FiftyOne のタグとフィールドの命名をここに集約する。
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 #: 機械が付けるタグの接頭辞。人間は絶対に触らない。
 AUTO_PREFIX = "auto:"
@@ -139,3 +140,31 @@ def parse_review_tag(tag: str) -> str | None:
         return None
     value = tag[len(REVIEW_PREFIX) :]
     return value if value in set(ReviewStatusTag) else None
+
+
+#: 「判定済み」とみなす値。``pending`` は含まない。
+DECIDED: frozenset[str] = frozenset(
+    {
+        ReviewStatusTag.KEEP.value,
+        ReviewStatusTag.EXCLUDE.value,
+        ReviewStatusTag.UNCERTAIN.value,
+    }
+)
+
+
+def effective_status(field_value: Any, tags: list[str]) -> str:
+    """フィールドを正とし、フィールドが未判定ならタグを見る。
+
+    App でタグ付けだけして ``review_status`` フィールドを触っていない場合でも
+    判定を拾えるようにするためのフォールバック。``export_decisions`` /
+    ``fiftyone_builder.dataset_summary`` の両方が同じ基準で判定を数えるよう、
+    ここに一本化する。
+    """
+    value = str(field_value or ReviewStatusTag.PENDING.value)
+    if value in DECIDED:
+        return value
+    for tag in tags:
+        parsed = parse_review_tag(tag)
+        if parsed in DECIDED:
+            return parsed
+    return ReviewStatusTag.PENDING.value

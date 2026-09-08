@@ -218,7 +218,7 @@ def build_payload(
     issues: Sequence[Issue],
     decisions: Sequence[SelectionDecision],
     checks: Sequence[Any],
-    masks: dict[tuple[str, str], MaskMeasurement],
+    masks: dict[tuple[str, str, str], MaskMeasurement],
     files: dict[str, FileMeasurement],
     fingerprint: str,
     population: dict[str, Any] | None = None,
@@ -227,7 +227,7 @@ def build_payload(
     ds, inst, usr, code_text, reason, cid = (_Vocab() for _ in range(6))
     rows: list[list[Any]] = []
     for d in decisions:
-        mask = masks.get((d.geometry_uid, ROLE_MASK))
+        mask = masks.get((d.dataset_id, d.geometry_uid, ROLE_MASK))
         file_measurement = files.get(d.file_uid)
         rows.append(
             [

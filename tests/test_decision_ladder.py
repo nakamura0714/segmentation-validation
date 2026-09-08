@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from conftest import make_issue, make_record
+from conftest import DATASET, make_issue, make_record
 
 from segmentation_validation.checks.base import CheckStatus, Severity
 from segmentation_validation.selection.decisions import (
@@ -98,9 +98,14 @@ def test_判定不能はkeepだが未検証と記録する(config):
     assert d.detected_checks == NONE
 
 
+#: build_decisions の automatic/out_of_scope は annotation_uid
+#: （f"{dataset_id}::{geometry_uid}"）キー。human は bare geometry_uid のまま。
+KEY_A = f"{DATASET}::A"
+
+
 def test_自動excludeが確定する(config):
     automatic = {
-        "A": AutomaticDecision(
+        KEY_A: AutomaticDecision(
             geometry_uid="A",
             decision=Decision.EXCLUDE,
             reason=Reason.OLDER_EXACT_DUPLICATE.value,
@@ -118,7 +123,7 @@ def test_自動excludeが確定する(config):
 def test_自動keepは最終keepではない(config):
     """★ラダーの3。D01 で残った側が体外領域にも当たっていれば pending。"""
     automatic = {
-        "A": AutomaticDecision(
+        KEY_A: AutomaticDecision(
             geometry_uid="A", decision=Decision.KEEP, reason="newest_of_group"
         )
     }
@@ -131,7 +136,7 @@ def test_自動keepは最終keepではない(config):
 
 def test_自動keepでほかにissueが無ければkeep(config):
     automatic = {
-        "A": AutomaticDecision(
+        KEY_A: AutomaticDecision(
             geometry_uid="A", decision=Decision.KEEP, reason="newest_of_group"
         )
     }
@@ -163,7 +168,7 @@ def test_人間の判定が最優先(config):
 
 def test_人間が自動判定を覆したら監査できる(config):
     automatic = {
-        "A": AutomaticDecision(
+        KEY_A: AutomaticDecision(
             geometry_uid="A", decision=Decision.EXCLUDE, reason="older_exact_duplicate"
         )
     }
@@ -188,7 +193,9 @@ def test_人間が自動判定を覆したら監査できる(config):
 def test_検証対象外はout_of_scopeとして残る(config):
     """チェックを走らせていないので ``no_issue_detected`` と混ぜない。"""
     d = only(
-        build_decisions([make_record("A")], [], config, out_of_scope=frozenset({"A"}))
+        build_decisions(
+            [make_record("A")], [], config, out_of_scope=frozenset({KEY_A})
+        )
     )
 
     assert d.final_decision is Decision.KEEP

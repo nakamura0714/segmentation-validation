@@ -24,7 +24,7 @@ from segmentation_validation.checks.base import (
 )
 from segmentation_validation.config import Config
 from segmentation_validation.core.labels import Label
-from segmentation_validation.core.measure import PairMeasurement
+from segmentation_validation.core.measure import ROLE_MASK, MaskMeasurement, PairMeasurement
 from segmentation_validation.core.records import AnnotationRecord, FileGroup
 
 DATASET = "SYNTH"
@@ -71,6 +71,8 @@ def config() -> Config:
 def make_record(
     uid: str,
     *,
+    dataset_id: str = DATASET,
+    source_json: str = SOURCE,
     timestamp: str | None = "2026-01-01 00:00:00+00:00",
     labels: tuple[Label, ...] = (PNEUMOTHORAX,),
     annotation_type: str = "brush",
@@ -80,11 +82,17 @@ def make_record(
     json_bbox: tuple[int, int, int, int] = (10, 10, 100, 100),
     region_count: int | None = 1,
 ) -> AnnotationRecord:
-    """annotation 1件。``uid`` 以外は既定値で埋める。"""
+    """annotation 1件。``uid`` 以外は既定値で埋める。
+
+    ``dataset_id``/``source_json`` を明示的に変えられるのは、クロスデータセット
+    重複（D05）のテストで「同じ ``file``（＝同じ ``resolved_image_path``）だが
+    別データセット」の2レコードを作るため。既定は単一データセットのテストと
+    互換のまま。
+    """
     mask = Path(f"/synth/mask/{uid}.png") if has_mask else None
     return AnnotationRecord(
-        dataset_id=DATASET,
-        source_json=SOURCE,
+        dataset_id=dataset_id,
+        source_json=source_json,
         institution=INSTITUTION,
         study=STUDY,
         series=SERIES,
@@ -114,6 +122,29 @@ def make_record(
         group_id=None,
         comment=None,
         labels=labels,
+    )
+
+
+def make_mask_measurement(
+    record: AnnotationRecord,
+    *,
+    mask_hash: str | None = "hash1",
+    role: str = ROLE_MASK,
+) -> MaskMeasurement:
+    """マスクの計測値1枚分。D05（クロスデータセット重複）は内容一致の判定に
+    ``mask_hash`` を使うので、同じ ``mask_hash`` を渡せば「内容が一致するマスク」
+    を合成できる。
+    """
+    return MaskMeasurement(
+        file_uid=record.file_uid,
+        geometry_uid=record.geometry_uid,
+        role=role,
+        dataset_id=record.dataset_id,
+        source_json=record.source_json,
+        annotation_type=record.annotation_type,
+        mask_path=record.path_mask,
+        exists=True,
+        mask_hash=mask_hash,
     )
 
 

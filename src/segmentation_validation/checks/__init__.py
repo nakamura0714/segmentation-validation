@@ -21,6 +21,7 @@ from .duplicate import (
     d02_label_conflict,
     d03_near_duplicate,
     d04_contained_duplicate,
+    d05_cross_dataset_duplicate,
 )
 from .machine import (
     m01_mask_resolution,
@@ -54,6 +55,7 @@ DUPLICATE_CHECKS: tuple[Check, ...] = (
     d02_label_conflict,
     d03_near_duplicate,
     d04_contained_duplicate,
+    d05_cross_dataset_duplicate,
 )
 
 # ② 疑わしい項目

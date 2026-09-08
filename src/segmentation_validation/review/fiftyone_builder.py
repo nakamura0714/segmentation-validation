@@ -19,6 +19,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from collections import Counter
+
 from ..config import Config
 from .review_schema import (
     ALL_SUGGESTED_REASONS,
@@ -33,6 +35,7 @@ from .review_schema import (
     FLAG_NEEDS_REPORT,
     SCHEMA_SEED_TAG,
     ReviewStatusTag,
+    effective_status,
     review_tag,
 )
 
@@ -293,6 +296,14 @@ def _save_views(dataset, config: Config) -> None:
         ),
         "修正前後の食い違い。サイドバーで original も表示すると重ねて比較できる",
     )
+    save(
+        "9-needs-report-first",
+        # tags は ListField なので App のフィールドソートでは並べ替えられない。
+        # sort_by() はフィールド名だけでなく ViewExpression も受け付けるので、
+        # 絞り込まずに真偽値で並べ替えるだけの全件ビューにする。
+        base.sort_by(F("tags").contains(FLAG_NEEDS_REPORT), reverse=True),
+        "flag:needs_report を先頭に寄せた全件ビュー（絞り込まず順序だけ変える）",
+    )
     logger.info("保存ビュー: %s", dataset.list_saved_views())
 
 
@@ -308,16 +319,32 @@ def dataset_summary(config: Config) -> dict[str, Any]:
     from fiftyone import ViewField as F
 
     real = dataset.match(~F("tags").contains(SCHEMA_SEED_TAG))
+
+    # count_values() はフィールドの生値しか見ないので、タグだけで判定した分を
+    # 拾えない（review_status が pending のまま残って見える）。export_decisions
+    # と同じ effective_status() で判定してから集計する。
+    annotation_status: Counter[str] = Counter()
+    image_status: Counter[str] = Counter()
+    for sample in real.select_fields([FIELD_REVIEW_STATUS, "tags", FIELD_FINAL]):
+        image_status[
+            effective_status(sample.get_field(FIELD_REVIEW_STATUS), list(sample.tags or []))
+        ] += 1
+        detections = sample.get_field(FIELD_FINAL)
+        for detection in detections.detections if detections else []:
+            annotation_status[
+                effective_status(
+                    detection.get_field(FIELD_REVIEW_STATUS), list(detection.tags or [])
+                )
+            ] += 1
+
     return {
         "name": name,
         "n_samples": len(real),
         "n_detections": real.count(f"{FIELD_FINAL}.detections"),
         "label_tags": real.count_label_tags(),
         "sample_tags": real.count_sample_tags(),
-        "annotation_status": real.count_values(
-            f"{FIELD_FINAL}.detections.{FIELD_REVIEW_STATUS}"
-        ),
-        "image_status": real.count_values(FIELD_REVIEW_STATUS),
+        "annotation_status": dict(annotation_status),
+        "image_status": dict(image_status),
     }
 
 

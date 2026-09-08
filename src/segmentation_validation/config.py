@@ -153,6 +153,11 @@ class DecisionPolicyConfig:
     auto_decidable: list[str] = field(
         default_factory=lambda: [
             "D01_EXACT_DUPLICATE",
+            # クロスデータセット重複（内容一致でtimestampが新しい方を残せる場合のみ）。
+            # 同点・欠損（D05_CROSS_DATASET_DUPLICATE_TIE）や内容不一致
+            # （D05_CROSS_DATASET_MISMATCH）は下の review_required に具体名で
+            # 登録してあり、そちらが優先される（match_rank は具体的な指定が勝つ）。
+            "D05_CROSS_DATASET_DUPLICATE",
             "M01_MASK_RESOLUTION",
             "M02_MASK_CHANNELS",
             "M03_MASK_BINARY",
@@ -167,6 +172,11 @@ class DecisionPolicyConfig:
             "D02_EXACT_MASK_LABEL_CONFLICT",
             "D03_NEAR_DUPLICATE",
             "D04_CONTAINED_DUPLICATE",
+            # クロスデータセット重複のうち、自動で代表を選べなかったもの
+            # （timestamp同点・欠損）と、geometry_uidが同じなのに内容が
+            # 食い違うもの。どちらも自動exclude禁止で必ず人が見る。
+            "D05_CROSS_DATASET_DUPLICATE_TIE",
+            "D05_CROSS_DATASET_MISMATCH",
             "S03_TINY_ANNOTATION",
             "S03_STRAY_COMPONENT",
             "S03_SUSPICIOUSLY_SMALL",

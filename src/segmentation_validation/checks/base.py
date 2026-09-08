@@ -20,6 +20,7 @@ from ..core.records import AnnotationRecord, FileGroup
 
 if TYPE_CHECKING:  # 実行時の循環importを避ける
     from ..core.measure import FileMeasurement, MaskMeasurement, PairMeasurement
+    from ..selection.decisions import AutomaticDecision
 
 
 class Severity(StrEnum):
@@ -93,6 +94,51 @@ class Issue:
         return self.check_id.split("_", 1)[0]
 
 
+def build_issue(
+    check_id: str,
+    record: AnnotationRecord,
+    message: str,
+    *,
+    category: Category,
+    severity: Severity = Severity.WARNING,
+    status: CheckStatus = CheckStatus.CHECKED,
+    review_priority: ReviewPriority = ReviewPriority.NORMAL,
+    related_geometry_uids: tuple[str, ...] = (),
+    duplicate_group_id: str | None = None,
+    cannot_determine_reason: str | None = None,
+    **detail: Any,
+) -> Issue:
+    """レコードから所在フィールドを埋めて Issue を作る。
+
+    ``CheckContext.issue`` の実体。モジュール関数にしてあるのは、
+    ``CheckContext`` がまだ組み上がっていない場面（``cli._load_context`` 内での
+    クロスデータセット重複の事前検出など）でも同じ生成ロジックを使うため。
+    """
+    return Issue(
+        check_id=check_id,
+        category=category,
+        severity=severity,
+        status=status,
+        review_priority=review_priority,
+        dataset_id=record.dataset_id,
+        source_json=record.source_json,
+        institution=record.institution,
+        study=record.study,
+        series=record.series,
+        file=record.file,
+        file_uid=record.file_uid,
+        geometry_uid=record.geometry_uid,
+        annotation_type=record.annotation_type,
+        image_path=record.image_path,
+        mask_path=record.path_mask,
+        message=message,
+        detail=detail,
+        related_geometry_uids=related_geometry_uids,
+        duplicate_group_id=duplicate_group_id,
+        cannot_determine_reason=cannot_determine_reason,
+    )
+
+
 @dataclass(frozen=True)
 class CheckContext:
     """チェックへの入力一式。``cli`` が1度だけ組む。"""
@@ -104,17 +150,43 @@ class CheckContext:
     records: tuple[AnnotationRecord, ...]
     # 対象外の annotation。チェックは走らせないが採否マスタには1行残す。
     out_of_scope: tuple[AnnotationRecord, ...] = ()
+    # クロスデータセット重複の非代表側。out_of_scope と同様にチェックは走らせないが
+    # 採否マスタには1行残す（reason=cross_dataset_duplicate で自動 exclude 済み）。
+    cross_dataset_excluded: tuple[AnnotationRecord, ...] = ()
     groups: tuple[FileGroup, ...] = ()
     # dataset_id -> パス規約（M06 が使う。規約は形式固有なのでアダプタが持つ）
     path_invariants: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     # 以下は scan 済みのときだけ埋まる。JSONだけで判定できるチェックは空でも動く。
-    masks: Mapping[tuple[str, str], "MaskMeasurement"] = field(default_factory=dict)
+    # キーは (dataset_id, geometry_uid, role)。geometry_uid だけだとデータセットを
+    # 跨いだ再エクスポートで衝突するため dataset_id を含める。
+    masks: Mapping[tuple[str, str, str], "MaskMeasurement"] = field(
+        default_factory=dict
+    )
     files: Mapping[str, "FileMeasurement"] = field(default_factory=dict)
     pairs: tuple["PairMeasurement", ...] = ()
+    # クロスデータセット重複検出（D05）は _load_context 内で ctx.records が
+    # 確定する前に済ませる必要がある（非代表側を checks から隠すため）ので、
+    # 検出結果の Issue はここに事前に持たせておき、D05 チェックモジュールは
+    # これをそのまま yield するだけの薄い皮になる。
+    cross_dataset_issues: tuple[Issue, ...] = ()
+    # D05 が計算した自動採否（annotation_uid キー）。select がそのまま
+    # merge_automatic に渡せるよう、検出と同時に計算済みのものを保持する。
+    cross_dataset_automatic: Mapping[str, "AutomaticDecision"] = field(
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "by_uid", {record.geometry_uid: record for record in self.records}
+        )
+        # ``by_uid`` は bare geometry_uid キーなので、データセットを跨いで同じ
+        # geometry_uid が再エクスポートされていると衝突する（後勝ちで上書きされる）。
+        # ペア系チェック（D01-D04）は同一 dataset 内でしかペアを作らないため、
+        # 相手レコードの引き当ては dataset_id まで含めた annotation_uid で行う。
+        object.__setattr__(
+            self,
+            "by_annotation_uid",
+            {record.annotation_uid: record for record in self.records},
         )
         by_file: dict[str, list[AnnotationRecord]] = {}
         for record in self.records:
@@ -145,30 +217,22 @@ class CheckContext:
         """レコードから所在フィールドを埋めて Issue を作る。
 
         8個の所在フィールドを各チェックで手写しすると必ずずれるので、
-        生成はここに集約する。
+        生成はここに集約する。実体は ``build_issue``（``CheckContext`` が
+        まだ無い場面、例えば ``_load_context`` 内での事前検出でも使えるように
+        モジュール関数として切り出してある）。
         """
-        return Issue(
-            check_id=check_id,
+        return build_issue(
+            check_id,
+            record,
+            message,
             category=category,
             severity=severity,
             status=status,
             review_priority=review_priority,
-            dataset_id=record.dataset_id,
-            source_json=record.source_json,
-            institution=record.institution,
-            study=record.study,
-            series=record.series,
-            file=record.file,
-            file_uid=record.file_uid,
-            geometry_uid=record.geometry_uid,
-            annotation_type=record.annotation_type,
-            image_path=record.image_path,
-            mask_path=record.path_mask,
-            message=message,
-            detail=detail,
             related_geometry_uids=related_geometry_uids,
             duplicate_group_id=duplicate_group_id,
             cannot_determine_reason=cannot_determine_reason,
+            **detail,
         )
 
     def file_issue(

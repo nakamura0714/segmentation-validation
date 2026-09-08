@@ -32,15 +32,15 @@ from typing import Any
 from ..config import Config
 from .fiftyone_builder import configure_database
 from .review_schema import (
+    DECIDED,
     FIELD_FINAL,
     FIELD_REVIEW_COMMENT,
     FIELD_REVIEW_REASON,
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
-    ReviewStatusTag,
-    parse_review_tag,
 )
+from .review_schema import effective_status as _effective_status
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +53,6 @@ COLUMNS = (
     "reviewed_at",
     "comment",
 )
-
-DECIDED = {
-    ReviewStatusTag.KEEP.value,
-    ReviewStatusTag.EXCLUDE.value,
-    ReviewStatusTag.UNCERTAIN.value,
-}
 
 
 def collect_decisions(
@@ -242,18 +236,6 @@ def _is_human(
     if manifest is None:
         return False
     return baseline is not None and row["decision"] != baseline
-
-
-def _effective_status(field_value: Any, tags: list[str]) -> str:
-    """フィールドを正とし、フィールドが未判定ならタグを見る。"""
-    value = str(field_value or ReviewStatusTag.PENDING.value)
-    if value in DECIDED:
-        return value
-    for tag in tags:
-        parsed = parse_review_tag(tag)
-        if parsed in DECIDED:
-            return parsed
-    return ReviewStatusTag.PENDING.value
 
 
 def _row(kind: str, key: str, status: str, holder: Any) -> dict[str, Any]:

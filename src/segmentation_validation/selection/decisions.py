@@ -51,6 +51,7 @@ class Reason(StrEnum):
     # 「検査して問題なし」と区別するために別 reason にする。
     KEPT_WITHOUT_FULL_CHECK = "kept_without_full_check"
     OLDER_EXACT_DUPLICATE = "older_exact_duplicate"
+    CROSS_DATASET_DUPLICATE = "cross_dataset_duplicate"
     REVIEW_REQUIRED = "review_required"
 
 
@@ -238,13 +239,26 @@ def build_decisions(
     automatic = automatic or {}
     human = human or {}
 
+    # ``geometry_uid`` は本来データセット全体で一意という前提だが、再エクスポートに
+    # より複数データセットで同じ geometry_uid が使われている実例がある
+    # （PTE/PTR/mask136 の cross-dataset 重複）。issue 由来の集計を bare
+    # geometry_uid だけで持つと、別データセットの Issue が混ざって誤帰属する
+    # ので、``f"{dataset_id}::{geometry_uid}"``（``AnnotationRecord.annotation_uid``
+    # と同じ形式）を内部キーにする。``automatic`` もこの形式でキーされている前提
+    # （``selection.automatic`` 側で annotation_uid 化済み）。``human`` だけは
+    # ``review_decisions.json`` が dataset_id を持たないため bare geometry_uid の
+    # ままにする —— cross-dataset 重複の非代表側は check 自体が走らないため
+    # FiftyOne 上でも重複した geometry_uid が同時に目視対象になることはない
+    # （同じ geometry_uid で内容も食い違う Tier1 ケースだけが例外で、その場合は
+    # 両側に同じ人間の判定を適用する）。
     detected: dict[str, list[str]] = {}
     unverified: dict[str, list[str]] = {}
     severity: dict[str, str] = {}
     review_flag: dict[str, bool] = {}
     counts: dict[str, int] = {}
-    # D01以外（D03/D04）は自動判定を持たないので、重複の対応関係はIssue側からしか
-    # 拾えない。ここで拾っておき、automaticが無い場合のフォールバックに使う。
+    # D01以外（D03/D04/D05）は自動判定を持たないことがあるので、重複の対応関係は
+    # Issue側からしか拾えない。ここで拾っておき、automaticが無い場合の
+    # フォールバックに使う。
     duplicate_group: dict[str, str] = {}
     related: dict[str, str] = {}
 
@@ -252,35 +266,37 @@ def build_decisions(
         uid = issue.geometry_uid
         if uid is None:
             continue
+        key = f"{issue.dataset_id}::{uid}"
 
         if issue.duplicate_group_id is not None:
-            duplicate_group.setdefault(uid, issue.duplicate_group_id)
+            duplicate_group.setdefault(key, issue.duplicate_group_id)
         if issue.related_geometry_uids:
-            related.setdefault(uid, issue.related_geometry_uids[0])
+            related.setdefault(key, issue.related_geometry_uids[0])
 
         if effective_review_required(issue.check_id, issue.status, config):
-            review_flag[uid] = True
+            review_flag[key] = True
 
         if issue.status is CheckStatus.CANNOT_DETERMINE:
-            _append_unique(unverified.setdefault(uid, []), issue.check_id)
+            _append_unique(unverified.setdefault(key, []), issue.check_id)
             continue
         if issue.status is CheckStatus.NOT_APPLICABLE:
             continue
 
-        counts[uid] = counts.get(uid, 0) + 1
-        _append_unique(detected.setdefault(uid, []), issue.check_id)
+        counts[key] = counts.get(key, 0) + 1
+        _append_unique(detected.setdefault(key, []), issue.check_id)
         if _SEVERITY_ORDER[issue.severity.value] > _SEVERITY_ORDER.get(
-            severity.get(uid, NONE), 0
+            severity.get(key, NONE), 0
         ):
-            severity[uid] = issue.severity.value
+            severity[key] = issue.severity.value
 
     decisions: list[SelectionDecision] = []
     for record in records:
         uid = record.geometry_uid
-        auto = automatic.get(uid)
+        key = record.annotation_uid
+        auto = automatic.get(key)
         verdict = human.get(uid)
-        needs_review = review_flag.get(uid, False)
-        has_unverified = uid in unverified
+        needs_review = review_flag.get(key, False)
+        has_unverified = key in unverified
 
         overrides = False
         if verdict is not None:
@@ -299,7 +315,7 @@ def build_decisions(
             decision = Decision.KEEP
             reason = Reason.KEPT_WITHOUT_FULL_CHECK.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
-        elif uid in out_of_scope:
+        elif key in out_of_scope:
             decision = Decision.KEEP
             reason = Reason.OUT_OF_SCOPE.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
@@ -325,10 +341,10 @@ def build_decisions(
                 code_text=label.code_text if label else "",
                 user=record.user,
                 timestamp=record.timestamp,
-                detected_checks="|".join(detected.get(uid, [])) or NONE,
-                unverified_checks="|".join(unverified.get(uid, [])) or NONE,
-                issue_count=counts.get(uid, 0),
-                max_severity=severity.get(uid, NONE),
+                detected_checks="|".join(detected.get(key, [])) or NONE,
+                unverified_checks="|".join(unverified.get(key, [])) or NONE,
+                issue_count=counts.get(key, 0),
+                max_severity=severity.get(key, NONE),
                 review_required=needs_review,
                 review_status=status,
                 final_decision=decision,
@@ -336,10 +352,10 @@ def build_decisions(
                 decision_source=source,
                 overrides_automatic=overrides,
                 related_geometry_uid=(auto.related_geometry_uid if auto else None)
-                or related.get(uid),
+                or related.get(key),
                 kept_geometry_uid=auto.kept_geometry_uid if auto else None,
                 duplicate_group_id=(auto.duplicate_group_id if auto else None)
-                or duplicate_group.get(uid),
+                or duplicate_group.get(key),
                 reviewer=verdict.reviewer if verdict else None,
                 reviewed_at=verdict.reviewed_at if verdict else None,
                 comment=verdict.comment if verdict else None,
@@ -520,12 +536,19 @@ def assert_invariants(
             f"selection_decisions の行数 {len(decisions)} が "
             f"annotation 件数 {len(records)} と一致しない"
         )
-    uids = {decision.geometry_uid for decision in decisions}
+    # geometry_uid は本来データセット全体で一意という前提だが、再エクスポートに
+    # より複数データセットで同じ geometry_uid が使われている実例がある
+    # （cross-dataset 重複。D05 が検出し reason=cross_dataset_duplicate で
+    # 自動 exclude するが、行自体は両方残る）。そのため一意性は
+    # ``(dataset_id, geometry_uid)`` の複合キーで見る。
+    uids = {(decision.dataset_id, decision.geometry_uid) for decision in decisions}
     if len(uids) != len(decisions):
-        raise AssertionError("selection_decisions に geometry_uid の重複がある")
-    if uids != {record.geometry_uid for record in records}:
         raise AssertionError(
-            "selection_decisions と annotation の geometry_uid が一致しない"
+            "selection_decisions に (dataset_id, geometry_uid) の重複がある"
+        )
+    if uids != {(record.dataset_id, record.geometry_uid) for record in records}:
+        raise AssertionError(
+            "selection_decisions と annotation の (dataset_id, geometry_uid) が一致しない"
         )
 
     for decision in decisions:

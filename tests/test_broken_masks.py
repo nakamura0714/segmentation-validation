@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from conftest import make_issue
+from conftest import DATASET, make_issue
 
 from segmentation_validation.checks.base import Category, CheckStatus, Severity
 from segmentation_validation.selection.automatic import (
@@ -34,15 +34,18 @@ AUTO_EXCLUDABLE = (
     "M05_FILE_EXISTS",
 )
 
+# build_broken_decisions のキーは annotation_uid（f"{dataset_id}::{geometry_uid}"）。
+KEY_A = f"{DATASET}::A"
+
 
 def test_壊れたマスクは自動excludeになる(config):
     for check_id in AUTO_EXCLUDABLE:
         issues = [make_issue(check_id, geometry_uid="A")]
         decisions = build_broken_decisions(issues, config)
 
-        assert decisions["A"].decision is Decision.EXCLUDE, check_id
-        assert decisions["A"].reason == BROKEN_MASK
-        assert decisions["A"].detail["check_id"] == check_id
+        assert decisions[KEY_A].decision is Decision.EXCLUDE, check_id
+        assert decisions[KEY_A].reason == BROKEN_MASK
+        assert decisions[KEY_A].detail["check_id"] == check_id
 
 
 def test_派生IDでも自動excludeになる(config):
@@ -51,7 +54,7 @@ def test_派生IDでも自動excludeになる(config):
     照合はモジュール単位でも効くこと（そうでないと実データの派生IDが漏れる）。
     """
     decisions = build_broken_decisions([make_issue("M05_FILE_MISSING")], config)
-    assert decisions["A"].decision is Decision.EXCLUDE
+    assert decisions[KEY_A].decision is Decision.EXCLUDE
 
 
 def test_severityがerrorでなければ自動excludeしない(config):
@@ -109,6 +112,6 @@ def test_同じannotationに複数の欠陥があっても1件にまとまる(co
     ]
     decisions = build_broken_decisions(issues, config)
 
-    assert list(decisions) == ["A"]
+    assert list(decisions) == [KEY_A]
     # 先に来たものが残る（どちらでも exclude なので採否は変わらない）。
-    assert decisions["A"].detail["check_id"] == "M01_MASK_RESOLUTION"
+    assert decisions[KEY_A].detail["check_id"] == "M01_MASK_RESOLUTION"

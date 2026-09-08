@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from conftest import NODULE, make_pair, make_record
+from conftest import DATASET, NODULE, make_pair, make_record
 
 from segmentation_validation.selection.automatic import (
     BROKEN_MASK,
@@ -27,6 +27,11 @@ from segmentation_validation.selection.decisions import (
 OLD = "2026-01-01 00:00:00+00:00"
 NEW = "2026-06-01 00:00:00+00:00"
 
+# build_automatic_decisions のキーは annotation_uid（f"{dataset_id}::{geometry_uid}"）。
+KEY_A = f"{DATASET}::A"
+KEY_B = f"{DATASET}::B"
+KEY_C = f"{DATASET}::C"
+
 
 def test_新しい方をkeepし古い方をexcludeする(config):
     records = [make_record("A", timestamp=OLD), make_record("B", timestamp=NEW)]
@@ -35,10 +40,10 @@ def test_新しい方をkeepし古い方をexcludeする(config):
     )
 
     assert undecidable == {}
-    assert decisions["A"].decision is Decision.EXCLUDE
-    assert decisions["A"].reason == Reason.OLDER_EXACT_DUPLICATE.value
-    assert decisions["A"].kept_geometry_uid == "B"
-    assert decisions["B"].decision is Decision.KEEP
+    assert decisions[KEY_A].decision is Decision.EXCLUDE
+    assert decisions[KEY_A].reason == Reason.OLDER_EXACT_DUPLICATE.value
+    assert decisions[KEY_A].kept_geometry_uid == "B"
+    assert decisions[KEY_B].decision is Decision.KEEP
 
 
 def test_geometry_uidの大小ではなくtimestampで決める(config):
@@ -46,8 +51,8 @@ def test_geometry_uidの大小ではなくtimestampで決める(config):
     records = [make_record("A", timestamp=NEW), make_record("B", timestamp=OLD)]
     decisions, _ = build_automatic_decisions(records, [make_pair("A", "B")], config)
 
-    assert decisions["A"].decision is Decision.KEEP
-    assert decisions["B"].decision is Decision.EXCLUDE
+    assert decisions[KEY_A].decision is Decision.KEEP
+    assert decisions[KEY_B].decision is Decision.EXCLUDE
 
 
 def test_timestampが同値なら自動決定せず目視へ回す(config):
@@ -96,10 +101,10 @@ def test_3件のグループなら最新1件だけ残す(config):
 
     assert undecidable == {}
     kept = [uid for uid, d in decisions.items() if d.decision is Decision.KEEP]
-    assert kept == ["C"]
-    assert decisions["A"].decision is Decision.EXCLUDE
-    assert decisions["B"].decision is Decision.EXCLUDE
-    assert decisions["A"].kept_geometry_uid == "C"
+    assert kept == [KEY_C]
+    assert decisions[KEY_A].decision is Decision.EXCLUDE
+    assert decisions[KEY_B].decision is Decision.EXCLUDE
+    assert decisions[KEY_A].kept_geometry_uid == "C"
 
 
 def test_ラベルが違う完全一致は自動採否しない(config):

@@ -20,7 +20,7 @@ def for_role(
 ) -> Iterator[tuple[AnnotationRecord, MaskMeasurement]]:
     """レコードと計測値の組を返す。計測が無いものは飛ばす。"""
     for record in ctx.records:
-        measurement = ctx.masks.get((record.geometry_uid, role))
+        measurement = ctx.masks.get((record.dataset_id, record.geometry_uid, role))
         if measurement is not None:
             yield record, measurement
 

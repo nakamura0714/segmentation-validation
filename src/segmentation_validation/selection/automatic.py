@@ -55,11 +55,18 @@ def build_broken_decisions(
     - ``M05_FILE_MISSING`` は画像もマスクも存在しないので**目視自体が不可能**
     - ``severity`` で絞るのは、original マスクの INFO（RGBAは仕様上正常）を
       巻き込まないため。``status`` で絞るのは判定不能を巻き込まないため
+
+    戻り値のキーは ``f"{dataset_id}::{geometry_uid}"``
+    （``AnnotationRecord.annotation_uid`` と同じ形式）。bare geometry_uid だと
+    データセットを跨いだ再エクスポートで衝突するため。
     """
     decisions: dict[str, AutomaticDecision] = {}
     for issue in issues:
         uid = issue.geometry_uid
-        if uid is None or uid in decisions:
+        if uid is None:
+            continue
+        key = f"{issue.dataset_id}::{uid}"
+        if key in decisions:
             continue
         if issue.category is not Category.MACHINE:
             continue
@@ -69,7 +76,7 @@ def build_broken_decisions(
             continue
         if policy_for(issue.check_id, config) is not Policy.AUTO_DECIDABLE:
             continue
-        decisions[uid] = AutomaticDecision(
+        decisions[key] = AutomaticDecision(
             geometry_uid=uid,
             decision=Decision.EXCLUDE,
             reason=BROKEN_MASK,
@@ -85,8 +92,12 @@ def build_automatic_decisions(
 ) -> tuple[dict[str, AutomaticDecision], dict[str, str]]:
     """D01 の重複グループについて自動採否を作る。
 
-    戻り値は ``(geometry_uid -> 決定, geometry_uid -> 自動決定できなかった理由)``。
-    後者は ``select`` が目視へ回すために使う。
+    戻り値は ``(annotation_uid -> 決定, geometry_uid -> 自動決定できなかった理由)``。
+    前者のキーは ``f"{dataset_id}::{geometry_uid}"``
+    （``AnnotationRecord.annotation_uid`` と同じ形式。``build_decisions`` 側の
+    lookup キーと揃える）。後者は ``select`` が目視へ回すために使う
+    （D01 の重複グループは同一データセット内でしか組まれないので bare
+    geometry_uid のままでよい）。
     """
     by_uid = {record.geometry_uid: record for record in records}
     classified = classify(pairs, config)
@@ -127,7 +138,8 @@ def build_automatic_decisions(
         stamps.sort(key=lambda item: item[0])  # type: ignore[arg-type,return-value]
         kept = stamps[-1][1]
         for _, uid in stamps[:-1]:
-            decisions[uid] = AutomaticDecision(
+            record = by_uid[uid]
+            decisions[record.annotation_uid] = AutomaticDecision(
                 geometry_uid=uid,
                 decision=Decision.EXCLUDE,
                 reason=Reason.OLDER_EXACT_DUPLICATE.value,
@@ -136,7 +148,8 @@ def build_automatic_decisions(
                 duplicate_group_id=group_id,
                 detail={"group_size": len(uids)},
             )
-        decisions[kept] = AutomaticDecision(
+        kept_record = by_uid[kept]
+        decisions[kept_record.annotation_uid] = AutomaticDecision(
             geometry_uid=kept,
             decision=Decision.KEEP,
             reason="newest_of_exact_duplicate_group",

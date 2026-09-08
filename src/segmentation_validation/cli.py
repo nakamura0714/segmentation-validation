@@ -355,17 +355,24 @@ def _select(config: Config, args: argparse.Namespace) -> int:
 
     issues = _read_issues(issues_path)
 
-    # 自動採否は2種類。
-    #   D01: 完全一致の重複 -> timestamp が新しい方を残す
+    # 自動採否は3種類。
+    #   D01: 完全一致の重複 -> timestamp が新しい方を残す（同一データセット内のみ）
+    #   D05: クロスデータセット重複 -> 同じくtimestampが新しい方を残す
+    #        （_load_context で ctx.records 確定前に計算済み）
     #   M01-M05: 機械が確定的に「使えない」と判定した欠陥 -> exclude
-    # 両方に当たった場合は exclude を優先する（merge_automatic）。
+    # 複数に当たった場合は exclude を優先する（merge_automatic）。
     duplicates, undecidable = build_automatic_decisions(
         context.records, context.pairs, config
     )
     broken = build_broken_decisions(issues, config)
-    automatic = merge_automatic(duplicates, broken)
+    automatic = merge_automatic(duplicates, broken, context.cross_dataset_automatic)
     if broken:
         logger.info("機械が確定した欠陥による自動exclude: %d 件", len(broken))
+    if context.cross_dataset_excluded:
+        logger.info(
+            "クロスデータセット重複による自動exclude: %d 件",
+            len(context.cross_dataset_excluded),
+        )
     auto_summary = summarize_automatic(automatic, undecidable)
     logger.info(
         "自動採否: exclude %d / keep %d（重複グループ %d）自動決定不能 %d",
@@ -385,15 +392,20 @@ def _select(config: Config, args: argparse.Namespace) -> int:
             len(human_images),
         )
 
-    # 採否マスタは「全 annotation が1行」なので対象外も含める。
-    all_records = list(context.records) + list(context.out_of_scope)
+    # 採否マスタは「全 annotation が1行」なので対象外・クロスデータセット重複の
+    # 非代表側も含める。
+    all_records = (
+        list(context.records)
+        + list(context.out_of_scope)
+        + list(context.cross_dataset_excluded)
+    )
     decisions = build_decisions(
         all_records,
         issues,
         config,
         automatic,
         human,
-        out_of_scope=frozenset(r.geometry_uid for r in context.out_of_scope),
+        out_of_scope=frozenset(r.annotation_uid for r in context.out_of_scope),
     )
     assert_invariants(decisions, all_records)
 
@@ -535,9 +547,17 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     rows = read_selection_json(selection_path)
-    by_uid = {row["geometry_uid"]: row["final_decision"] for row in rows}
-    pending = sum(1 for v in by_uid.values() if v == "pending")
-    uncertain = sum(1 for v in by_uid.values() if v == "uncertain")
+    # geometry_uid は本来データセット全体で一意という前提だが、再エクスポートにより
+    # 複数データセットで同じ geometry_uid が使われている実例がある。1つの by_uid を
+    # 全データセットで使い回すと、衝突時に別データセットの採否を誤って適用しかねない
+    # ので、dataset_id ごとに分けて持つ。
+    by_uid_per_dataset: dict[str, dict[str, str]] = {}
+    for row in rows:
+        by_uid_per_dataset.setdefault(row["dataset_id"], {})[row["geometry_uid"]] = row[
+            "final_decision"
+        ]
+    pending = sum(1 for row in rows if row["final_decision"] == "pending")
+    uncertain = sum(1 for row in rows if row["final_decision"] == "uncertain")
 
     # 画像単位の採否。annotation を持たない画像の扱いはこちらで決まる。
     image_rows = read_image_json(out_dir / "image_decisions.json")
@@ -587,7 +607,7 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
         results.append(
             build_development_json(
                 source,
-                by_uid,
+                by_uid_per_dataset.get(dataset_id, {}),
                 target,
                 config,
                 pending_as=args.pending_as,
@@ -975,15 +995,38 @@ def _load_context(config: Config) -> CheckContext | None:
             len(masks),
             len(pairs),
         )
+
+    # クロスデータセット重複（D05）の事前検出。ctx.records が確定する前に
+    # 非代表側を抜いておく必要がある（M01-M09/D01-D04 から隠して check を
+    # スキップするため）。out_of_scope の判定より後（ラベルで対象外に
+    # なったものは D05 の対象にしない）。
+    from .checks.duplicate.d05_cross_dataset_duplicate import detect as detect_cross_dataset
+
+    cross_result = detect_cross_dataset(in_scope, masks)
+    if cross_result.excluded_annotation_uids:
+        logger.info(
+            "クロスデータセット重複により自動除外: %d 件",
+            len(cross_result.excluded_annotation_uids),
+        )
+    final_records = [
+        r for r in in_scope if r.annotation_uid not in cross_result.excluded_annotation_uids
+    ]
+    cross_excluded = [
+        r for r in in_scope if r.annotation_uid in cross_result.excluded_annotation_uids
+    ]
+
     return CheckContext(
         config=config,
-        records=tuple(in_scope),
+        records=tuple(final_records),
         out_of_scope=tuple(out_scope),
+        cross_dataset_excluded=tuple(cross_excluded),
         groups=tuple(groups),
         path_invariants=invariants,
         masks=masks,
         files=files,
         pairs=tuple(pairs),
+        cross_dataset_issues=cross_result.issues,
+        cross_dataset_automatic=cross_result.automatic,
     )
 
 
@@ -1007,7 +1050,7 @@ def _load_measurements(config: Config):
         return {}, {}, []
 
     masks = {
-        (m.geometry_uid, m.role): m
+        (m.dataset_id, m.geometry_uid, m.role): m
         for m in rows_to_measurements(mask_rows, MaskMeasurement)
     }
     files = {f.file_uid: f for f in rows_to_measurements(file_rows, FileMeasurement)}
@@ -1027,7 +1070,11 @@ def _fingerprint(config: Config) -> str:
 
 
 def _meta(config: Config, context: CheckContext) -> dict[str, Any]:
-    records = tuple(context.records) + tuple(context.out_of_scope)
+    records = (
+        tuple(context.records)
+        + tuple(context.out_of_scope)
+        + tuple(context.cross_dataset_excluded)
+    )
     return {
         "fingerprint": _fingerprint(config),
         "sources": [str(path) for path in config.dataset_sources()],

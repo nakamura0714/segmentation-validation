@@ -343,7 +343,9 @@ def write_selection_summary(
     add(
         f"automatic decisions            {counts['source'].get('automatic', 0)}"
         f"   (うち D01 による自動exclude "
-        f"{counts['reason'].get(Reason.OLDER_EXACT_DUPLICATE.value, 0)})"
+        f"{counts['reason'].get(Reason.OLDER_EXACT_DUPLICATE.value, 0)}"
+        f" / クロスデータセット重複による自動exclude "
+        f"{counts['reason'].get(Reason.CROSS_DATASET_DUPLICATE.value, 0)})"
     )
     add(f"human decisions                {counts['source'].get('human', 0)}")
     add(f"default (keep)                 {counts['source'].get('default', 0)}")
