@@ -33,6 +33,9 @@ class ManifestAnnotation:
     label: str
     bounding_box: list[float]
     mask_path: str | None
+    # S04（修正前後の食い違い）目視用。final とは別レイヤーの Detection になる。
+    original_mask_path: str | None = None
+    original_bounding_box: list[float] | None = None
     # 機械が付けるタグ。再構築のたびに貼り直す。
     auto_tags: list[str] = field(default_factory=list)
     # 現在の採否。人間の判定が既にあればそれが入る。
@@ -117,6 +120,12 @@ def build_manifest(
                     ),
                     bounding_box=box,
                     mask_path=str(asset.masks.get(record.geometry_uid) or "") or None,
+                    original_mask_path=(
+                        str(asset.originals.get(record.geometry_uid) or "") or None
+                    ),
+                    original_bounding_box=asset.original_boxes.get(
+                        record.geometry_uid
+                    ),
                     auto_tags=sorted(
                         {auto_tag(i.check_id) for i in found if _is_auto_worthy(i)}
                     ),

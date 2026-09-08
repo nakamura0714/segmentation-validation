@@ -24,6 +24,7 @@ from .review_schema import (
     ALL_SUGGESTED_REASONS,
     FIELD_BAND,
     FIELD_FINAL,
+    FIELD_ORIGINAL,
     FIELD_REVIEW_COMMENT,
     FIELD_REVIEW_REASON,
     FIELD_REVIEW_STATUS,
@@ -99,6 +100,7 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
             sample[FIELD_BAND] = fo.Segmentation(mask_path=image["band_path"])
 
         detections = []
+        original_detections = []
         for annotation in image["annotations"]:
             detection = fo.Detection(
                 label=annotation["label"],
@@ -123,7 +125,20 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
             )
             detections.append(detection)
 
+            # S04（修正前後の食い違い）目視用。final とは別レイヤーなので
+            # 採否フィールドは持たない —— 判定は final 側の annotation に対して行う。
+            if annotation.get("original_mask_path"):
+                original_detection = fo.Detection(
+                    label=annotation["label"],
+                    bounding_box=annotation["original_bounding_box"],
+                    mask_path=annotation["original_mask_path"],
+                )
+                original_detection["geometry_uid"] = annotation["geometry_uid"]
+                original_detections.append(original_detection)
+
         sample[FIELD_FINAL] = fo.Detections(detections=detections)
+        if original_detections:
+            sample[FIELD_ORIGINAL] = fo.Detections(detections=original_detections)
         samples.append(sample)
 
     if manifest["images"]:
@@ -131,11 +146,19 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
 
     dataset.add_samples(samples)
     _save_views(dataset, config)
+    # FIELD_ORIGINAL は1件も無ければスキーマに現れない動的フィールドなので、
+    # 無条件に count するとエラーになる。
+    n_original = (
+        dataset.count(f"{FIELD_ORIGINAL}.detections")
+        if FIELD_ORIGINAL in dataset.get_field_schema()
+        else 0
+    )
     logger.info(
-        "FiftyOne dataset '%s': %d Sample / %d Detection",
+        "FiftyOne dataset '%s': %d Sample / %d Detection（うち original 併記 %d）",
         name,
         len(dataset),
         dataset.count(f"{FIELD_FINAL}.detections"),
+        n_original,
     )
     return dataset
 
@@ -262,6 +285,13 @@ def _save_views(dataset, config: Config) -> None:
         "7-flagged-for-report",
         base.match(F("tags").contains(FLAG_NEEDS_REPORT)),
         "検証対象外だが気になったannotation/画像。データ管理担当への報告用",
+    )
+    save(
+        "8-original-final-divergence",
+        base.filter_labels(
+            FIELD_FINAL, F("tags").contains("auto:s04_original_final_divergence")
+        ),
+        "修正前後の食い違い。サイドバーで original も表示すると重ねて比較できる",
     )
     logger.info("保存ビュー: %s", dataset.list_saved_views())
 

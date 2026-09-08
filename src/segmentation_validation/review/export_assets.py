@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 IMAGES_DIR = "images"
 MASKS_DIR = "masks"
+ORIGINALS_DIR = "originals"
 BANDS_DIR = "bands"
 
 # bbox を切り出すときの余白[px]。輪郭が枠に張り付くと形が読めない。
@@ -50,6 +51,9 @@ class AssetPaths:
     masks: dict[str, Path] = field(default_factory=dict)
     # bbox は FiftyOne の相対座標 [x, y, w, h]
     boxes: dict[str, list[float]] = field(default_factory=dict)
+    # S04 目視用。``path_original_mask`` を final とは別レイヤーとして同じ形で書き出す。
+    originals: dict[str, Path] = field(default_factory=dict)
+    original_boxes: dict[str, list[float]] = field(default_factory=dict)
     # 表示のために枠を広げた annotation（退化した bbox）。
     # 目視する人に「元の座標はこうだった」と伝えるため記録する。
     adjusted: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -92,7 +96,7 @@ def export_group(
             continue
         mask_path = out_dir / MASKS_DIR / f"{record.geometry_uid}.png"
         try:
-            box = _export_mask(record, mask_path, shape, force)
+            box = _export_mask(record.resolved_path_mask, mask_path, shape, force)
         except (FileNotFoundError, MaskReadError) as error:
             logger.warning("マスクを書き出せない %s: %s", record.short_uid, error)
             continue
@@ -100,6 +104,23 @@ def export_group(
             continue
         result.masks[record.geometry_uid] = mask_path
         result.boxes[record.geometry_uid] = box
+
+        # S04（修正前後の食い違い）を目視できるよう、original も final と同じ形で
+        # 別レイヤーに書き出す。final が書き出せた場合にのみ意味を持つ比較対象。
+        if record.resolved_path_original_mask is not None:
+            original_path = out_dir / ORIGINALS_DIR / f"{record.geometry_uid}.png"
+            try:
+                original_box = _export_mask(
+                    record.resolved_path_original_mask, original_path, shape, force
+                )
+            except (FileNotFoundError, MaskReadError) as error:
+                logger.warning(
+                    "originalマスクを書き出せない %s: %s", record.short_uid, error
+                )
+                original_box = None
+            if original_box is not None:
+                result.originals[record.geometry_uid] = original_path
+                result.original_boxes[record.geometry_uid] = original_box
 
     band_path = out_dir / BANDS_DIR / f"{stem}.png"
     if reference_path is not None:
@@ -122,7 +143,7 @@ def export_assets(
     force: bool = False,
 ) -> dict[str, AssetPaths]:
     """必要な画像を書き出す。DICOM の全画素を読むので時間がかかる。"""
-    for name in (IMAGES_DIR, MASKS_DIR, BANDS_DIR):
+    for name in (IMAGES_DIR, MASKS_DIR, ORIGINALS_DIR, BANDS_DIR):
         (out_dir / name).mkdir(parents=True, exist_ok=True)
     # 側方バンドの生成で OpenCV を使う。共有サーバーなので内部スレッドを絞る。
     limit_native_threads()
@@ -152,7 +173,7 @@ def export_assets(
 
 
 def _export_mask(
-    record: AnnotationRecord,
+    mask_source: Path | None,
     out_path: Path,
     image_shape: tuple[int, int],
     force: bool,
@@ -160,10 +181,12 @@ def _export_mask(
     """マスクを bbox で切り出して保存し、相対座標の bbox を返す。
 
     ``fo.Detection.mask_path`` は **bbox 内の**マスクを期待するので、
-    全画面のマスクをそのまま渡してはいけない。
+    全画面のマスクをそのまま渡してはいけない。``path_mask`` / ``path_original_mask``
+    のどちらでも使えるよう経路は呼び出し側が渡す（``load_binary_mask`` は RGBA の
+    alpha も自動で拾うので original でも共通化できる）。
     """
-    assert record.resolved_path_mask is not None
-    mask = load_binary_mask(record.resolved_path_mask)
+    assert mask_source is not None
+    mask = load_binary_mask(mask_source)
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         return None

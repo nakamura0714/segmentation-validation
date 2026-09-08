@@ -34,7 +34,8 @@ REASON_PREFIX = "reason:"
 
 #: annotation を載せるフィールド。``path_mask`` 由来で、これがレビュー対象。
 FIELD_FINAL = "final"
-#: ``path_original_mask`` 由来。修正前との比較用で、レビュー対象ではない。
+#: ``path_original_mask`` 由来。final と重ねて目視比較するための表示専用レイヤーで、
+#: 採否判定（``review_status`` 等）は持たない（判定は常に final 側に対して行う）。
 FIELD_ORIGINAL = "original"
 #: 体外判定に使った側方バンド。S05 がなぜ発火したかを画面で見るため。
 FIELD_BAND = "thorax_band"
