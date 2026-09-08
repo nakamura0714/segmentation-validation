@@ -329,3 +329,154 @@ def test_判定が無ければ検出されない(built, review_config, synthetic
 
     lost = unexported_human_decisions(review_config, synthetic, tmp_path / "x.json")
     assert lost == []
+
+
+# ------------------------------------------------- App に出るフィールドの宣言
+
+
+def _panel_names(dataset) -> list[str]:
+    """Edit パネルが並べる属性名。並び順のまま返す。"""
+    return [a["name"] for a in dataset.label_schemas["final"]["attributes"]]
+
+
+def test_動的属性がfieldschemaに宣言される(built):
+    """★宣言しないと、値が入っているのに App のどこにも出ない。
+
+    ``add_samples`` の既定は ``dynamic=False``。それだと Edit パネルも
+    サイドバーも宣言済みフィールドしか見ないので、`timestamp` が
+    全 Detection に入っているのに一切表示されない（実際にそうなっていた）。
+    """
+    flat = built.get_field_schema(flat=True)
+
+    for name in ("timestamp", "annotator", "geometry_uid", "review_status"):
+        assert f"final.detections.{name}" in flat, name
+
+
+def test_作成日時がEditパネルに並ぶ(built):
+    """重複のどちらを exclude するかの判断材料。これが本題。"""
+    names = _panel_names(built)
+
+    assert "timestamp" in names
+    # 判定欄のすぐ下に置く（判断してから review_status に戻る動きになる）。
+    assert names.index("timestamp") > names.index("review_status")
+
+
+def test_判定フィールドは編集できて検証結果は読み取り専用(built):
+    """検証結果を App で書き換えても export は読まない。誤解を生むので固定する。"""
+    by_name = {a["name"]: a for a in built.label_schemas["final"]["attributes"]}
+
+    assert not by_name["review_status"].get("read_only")
+    assert not by_name["review_reason"].get("read_only")
+    assert by_name["timestamp"]["read_only"] is True
+    assert by_name["geometry_uid"]["read_only"] is True
+
+
+def test_読み取り専用の属性はドロップダウンにしない(built):
+    """timestamp や issues を候補一覧にすると長文が並んで読めなくなる。
+
+    component は型ごとに許される値が決まっている（bool に ``text`` は不正で、
+    label schema の検証が落ちる）ので、型の既定に戻っていることを見る。
+    """
+    from fiftyone.core.annotation.constants import DEFAULT_COMPONENTS
+
+    for attribute in built.label_schemas["final"]["attributes"]:
+        if not attribute.get("read_only"):
+            continue
+        assert "values" not in attribute, attribute["name"]
+        assert attribute["component"] == DEFAULT_COMPONENTS[attribute["type"]], (
+            attribute["name"]
+        )
+
+
+def test_常に空のフィールドはパネルに出さない(built):
+    """confidence / index / mask_path はこのツールでは使わない。"""
+    names = _panel_names(built)
+
+    for name in ("confidence", "index", "id", "mask_path"):
+        assert name not in names, name
+
+
+def test_labelのドロップダウン候補が残る(built):
+    """attributes を差し替えるときに classes を落とすと label が選べなくなる。"""
+    assert "pneumothorax" in built.label_schemas["final"]["classes"]
+
+
+# ------------------------------------------------- 重複ペアの相手の日時
+
+
+@pytest.fixture
+def duplicate_pair(tmp_path, review_config):
+    """重複ペア（A と B が互いに related）を持つ manifest。"""
+    from segmentation_validation.review.manifest import build_manifest
+
+    images_dir = tmp_path / "dup"
+    images_dir.mkdir()
+    blank = np.zeros((40, 40), dtype=np.uint8)
+    image = images_dir / "F9.png"
+    Image.fromarray(blank, mode="L").save(image)
+    mask = images_dir / "mask.png"
+    Image.fromarray(np.full((10, 10), 255, dtype=np.uint8), mode="L").save(mask)
+
+    record_a = replace(
+        make_record("A", file="F9"), timestamp="2026-07-02 07:50:38+00:00"
+    )
+    record_b = replace(
+        make_record("B", file="F9"),
+        timestamp="2026-07-02 07:50:52+00:00",
+        user="partner@example.com",
+    )
+    group = make_group((record_a, record_b), file="F9")
+    assets = {
+        group.file_uid: AssetPaths(
+            file_uid=group.file_uid,
+            image=image,
+            masks={"A": mask, "B": mask},
+            boxes={"A": [0.1, 0.1, 0.2, 0.2], "B": [0.1, 0.1, 0.2, 0.2]},
+        )
+    }
+    issues = [
+        make_issue("D04_CONTAINED_DUPLICATE", geometry_uid=uid, file="F9")
+        for uid in ("A", "B")
+    ]
+    decisions = [
+        replace(d, related_geometry_uid="B" if d.geometry_uid == "A" else "A")
+        for d in build_decisions([record_a, record_b], issues, review_config)
+    ]
+    image_decisions = build_image_decisions([group], issues, review_config)
+    return build_manifest(
+        [group], assets, decisions, image_decisions, issues, review_config
+    )
+
+
+def test_相手の日時がDetectionに載る(duplicate_pair, review_config):
+    """★片方を開くだけで判断できるようにするのが目的。
+
+    実データの DUP_0025 と同じ14秒差。ペア相手を開き直さずに済む。
+    """
+    import fiftyone as fo
+
+    from segmentation_validation.review.fiftyone_builder import build_dataset
+
+    build_dataset(duplicate_pair, review_config)
+    dataset = fo.load_dataset(DATASET_NAME)
+    try:
+        by_uid = {
+            det["geometry_uid"]: det
+            for sample in dataset
+            if SCHEMA_SEED_TAG not in sample.tags and sample["final"]
+            for det in sample["final"].detections
+        }
+        own = by_uid["A"]
+
+        assert own["timestamp"] == "2026-07-02 07:50:38+00:00"
+        assert own["partner_timestamp"] == "2026-07-02 07:50:52+00:00"
+        assert own["partner_annotator"] == "partner@example.com"
+        assert own["newer_in_pair"] is False
+        assert own["pair_verdict"] == "相手が新しい（14秒差）"
+
+        names = _panel_names(dataset)
+        assert "partner_timestamp" in names
+        assert "pair_verdict" in names
+    finally:
+        if DATASET_NAME in fo.list_datasets():
+            fo.delete_dataset(DATASET_NAME)

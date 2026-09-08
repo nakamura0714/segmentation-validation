@@ -241,6 +241,20 @@ def _display_note(adjusted: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _elapsed_ja(seconds: float) -> str:
+    """経過時間を読める形に丸める。
+
+    桁を揃えるより「14秒差」なのか「3日差」なのかが判断を分ける。
+    14秒差は同一作業の連続保存（どちらを残しても実質同じ）、
+    3日差は別作業（新しい方が修正版である可能性が高い）。
+    """
+    seconds = abs(seconds)
+    for unit, label in ((86400.0, "日"), (3600.0, "時間"), (60.0, "分")):
+        if seconds >= unit:
+            return f"{int(seconds // unit)}{label}"
+    return f"{int(seconds)}秒"
+
+
 def _duplicate_hint(
     record: Any,
     decision: SelectionDecision | None,
@@ -250,17 +264,40 @@ def _duplicate_hint(
 
     D01（``selection/automatic.py``）と同じ基準: 欠損・同値・比較不能なら
     判定しない。あくまで人間の判断材料であり、ここで採否を決めるわけではない。
+
+    **相手の実値も返す。** ``newer_in_pair`` の真偽だけだと、App で片方を開いた
+    人間は「では相手はいつなのか」を確かめるためにもう片方を開き直すことになる。
+    どちらを exclude するかはこの比較そのものなので、1つの Detection で
+    判断できる形にする。
+
+    ``records_by_uid`` は**同じ画像内のレコードしか持たない**（呼び出し側が
+    ``group.records`` から作る）。D05（クロスデータセット重複）の相手は別画像に
+    いるので引けず、その場合は何も返さない。
     """
     if decision is None or decision.related_geometry_uid is None:
         return {}
     partner = records_by_uid.get(decision.related_geometry_uid)
     if partner is None:
         return {}
+
+    hint: dict[str, Any] = {
+        "partner_timestamp": partner.timestamp or "",
+        "partner_annotator": partner.user or "",
+    }
     own_ts = record.parsed_timestamp
     partner_ts = partner.parsed_timestamp
-    if own_ts is None or partner_ts is None or own_ts == partner_ts:
-        return {"newer_in_pair": None}
-    return {"newer_in_pair": own_ts > partner_ts}
+    if own_ts is None or partner_ts is None:
+        return {**hint, "newer_in_pair": None, "pair_verdict": "比較不能"}
+    if own_ts == partner_ts:
+        return {**hint, "newer_in_pair": None, "pair_verdict": "同時刻"}
+
+    newer = own_ts > partner_ts
+    diff = _elapsed_ja((own_ts - partner_ts).total_seconds())
+    return {
+        **hint,
+        "newer_in_pair": newer,
+        "pair_verdict": f"{'自分' if newer else '相手'}が新しい（{diff}差）",
+    }
 
 
 def _attributes(record: Any, decision: SelectionDecision | None) -> dict[str, Any]:

@@ -147,7 +147,12 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
     if manifest["images"]:
         samples.extend(_seed_choice_candidates(manifest["images"][0]["filepath"]))
 
-    dataset.add_samples(samples)
+    # ``dynamic=True`` が要る。既定の False だと timestamp / review_status /
+    # newer_in_pair などの動的属性が **field schema に宣言されない**。App の
+    # Edit パネルもサイドバーも宣言済みフィールドしか見ないので、値が入っている
+    # のに一切表示されない（実機で確認済み。まさにこれが起きていた）。
+    dataset.add_samples(samples, dynamic=True)
+    _apply_label_schema(dataset)
     _save_views(dataset, config)
     # FIELD_ORIGINAL は1件も無ければスキーマに現れない動的フィールドなので、
     # 無条件に count するとエラーになる。
@@ -164,6 +169,98 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
         n_original,
     )
     return dataset
+
+
+#: Edit Detection パネルに出す属性と並び。``(名前, 読み取り専用か)``。
+#:
+#: 並びは**上から判断に使う順**。日時を判定欄のすぐ下に置くのは、重複ペアの
+#: どちらを exclude するかを決めてから ``review_status`` に戻る動きになるため。
+#:
+#: 読み取り専用にするものは検証結果の写しで、App で書き換えても
+#: ``review export`` は読まないし次の ``review build`` で上書きされる。
+#: 編集できると「直したのに反映されない」という誤解を生む。
+PANEL_ATTRIBUTES: tuple[tuple[str, bool], ...] = (
+    (FIELD_REVIEW_STATUS, False),
+    (FIELD_REVIEW_REASON, False),
+    (FIELD_REVIEWER, False),
+    (FIELD_REVIEW_COMMENT, False),
+    # 重複ペアの判断材料。自分と相手を並べて出す。
+    ("timestamp", True),
+    ("partner_timestamp", True),
+    ("pair_verdict", True),
+    ("newer_in_pair", True),
+    ("annotator", True),
+    ("partner_annotator", True),
+    ("duplicate_group_id", True),
+    ("related_geometry_uid", True),
+    # 検証結果との突き合わせキーと、何が検出されたか。
+    ("geometry_uid", True),
+    ("issues", True),
+    # flag:needs_report を付けるために編集可能にしておく。
+    ("tags", False),
+)
+
+#: パネルから外す属性。
+#:
+#: ``id`` / ``confidence`` / ``index`` はこのツールが一度も設定しないので常に空。
+#: ``mask_path`` は自動生成すると100件超のドロップダウンになって邪魔（マスク自体は
+#: パネルの Mask プレビューで見える）。施設・患者などは Sample 側に同じものがあり、
+#: 宣言はされるのでサイドバーのフィルタには出る。
+_PANEL_KEEP = {name for name, _ in PANEL_ATTRIBUTES}
+
+
+def _apply_label_schema(dataset) -> None:
+    """Edit パネルに出す属性をコードから決めて有効化する。
+
+    宣言しただけでは足りない。パネルが描くのは
+    「編集中ドラフト ?? 保存済み ``label_schema`` ?? ``default_label_schema``」で、
+    **保存済みスキーマが優先される**。App の Schema manager で手作業すると
+    そこに残るが、``review build`` は DB を作り直すので消える。コードから
+    設定しておけば、作り直しても同じパネルが再現される。
+
+    失敗してもビルド自体は続ける。パネルの見た目は目視の便宜であって、
+    dataset そのものは無くても使える。
+    """
+    from fiftyone.core.annotation.constants import DEFAULT_COMPONENTS
+
+    try:
+        generated = dataset.generate_label_schemas(fields=[FIELD_FINAL])
+        schema = generated[FIELD_FINAL]
+        available = {a["name"]: a for a in schema.get("attributes", [])}
+        attributes = []
+        for name, read_only in PANEL_ATTRIBUTES:
+            spec = available.get(name)
+            if spec is None:
+                # その属性を持つ annotation が1件も無い場合（重複が0件なら
+                # partner_timestamp は宣言されない）。黙って飛ばす。
+                continue
+            spec = dict(spec)
+            if read_only:
+                spec["read_only"] = True
+                # 読み取り専用の値をドロップダウンにすると、timestamp や issues の
+                # 長文が候補として並んで読めなくなる。素の入力欄に戻す。
+                # component は型ごとに許される値が決まっている（bool に "text" は
+                # 不正）ので、FiftyOne 自身の既定表を引く。
+                spec.pop("values", None)
+                spec["component"] = DEFAULT_COMPONENTS.get(
+                    spec.get("type"), spec.get("component")
+                )
+            attributes.append(spec)
+        schema["attributes"] = attributes
+        dataset.update_label_schema(FIELD_FINAL, schema)
+        dataset.activate_label_schemas([FIELD_FINAL])
+        logger.info(
+            "Edit パネルの属性を設定した（%d 件）: %s",
+            len(attributes),
+            ", ".join(a["name"] for a in attributes),
+        )
+        missing = _PANEL_KEEP - set(available)
+        if missing:
+            logger.debug("パネル候補のうち未宣言で飛ばした属性: %s", sorted(missing))
+    except Exception as error:  # App の見た目のためにビルドを失敗させない
+        logger.warning(
+            "Edit パネルの属性を設定できなかった（目視自体は可能）: %s", error
+        )
 
 
 def _seed_choice_candidates(reference_filepath: str) -> list:

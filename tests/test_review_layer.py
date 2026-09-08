@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
+import pytest
 from conftest import make_record
 
 from segmentation_validation.review.export_assets import MIN_DISPLAY_PX, _json_box
@@ -23,6 +25,7 @@ from segmentation_validation.review.export_decisions import (
     _exported_keys,
     _is_human,
 )
+from segmentation_validation.review.manifest import _duplicate_hint, _elapsed_ja
 from segmentation_validation.review.review_schema import (
     AUTO_PREFIX,
     REVIEW_PREFIX,
@@ -214,3 +217,108 @@ def test_画像サイズが不明なら枠を出さない():
 
     assert box is None
     assert adjusted == {}
+
+
+# ------------------------------------------------- 重複ペアの「どちらが新しいか」
+
+
+def make_pair_decision(config, related: str | None):
+    """``related_geometry_uid`` だけが要る採否を1件作る。"""
+    from segmentation_validation.selection.decisions import build_decisions
+
+    decision = build_decisions([make_record("A")], [], config)[0]
+    return replace(decision, related_geometry_uid=related)
+
+
+def hint(config, own_ts, partner_ts, *, partner_user="partner@example.com"):
+    """自分と相手の timestamp を指定して ``_duplicate_hint`` を呼ぶ。"""
+    own = replace(make_record("A"), timestamp=own_ts)
+    partner = replace(make_record("B"), timestamp=partner_ts, user=partner_user)
+    return _duplicate_hint(
+        own, make_pair_decision(config, "B"), {"A": own, "B": partner}
+    )
+
+
+def test_相手が新しければ相手が新しいと言う(config):
+    """★ここを逆にすると目視の判断が反転する。実データの DUP_0025 と同じ14秒差。"""
+    result = hint(config, "2026-07-02 07:50:38+00:00", "2026-07-02 07:50:52+00:00")
+
+    assert result["newer_in_pair"] is False
+    assert result["pair_verdict"] == "相手が新しい（14秒差）"
+
+
+def test_自分が新しければ自分が新しいと言う(config):
+    result = hint(config, "2026-07-02 07:50:52+00:00", "2026-07-02 07:50:38+00:00")
+
+    assert result["newer_in_pair"] is True
+    assert result["pair_verdict"] == "自分が新しい（14秒差）"
+
+
+def test_相手の日時と作業者を相手の値で返す(config):
+    """★自分の値を返すバグは「相手を見に行かなくてよい」という前提を壊す。"""
+    result = hint(config, "2026-07-02 07:50:38+00:00", "2021-10-31 06:11:51+00:00")
+
+    assert result["partner_timestamp"] == "2021-10-31 06:11:51+00:00"
+    assert result["partner_annotator"] == "partner@example.com"
+
+
+def test_同時刻なら判定しない(config):
+    """D01 の自動採否と同じ基準。同値は timestamp_tie で決められない。"""
+    result = hint(config, "2026-07-02 07:50:38+00:00", "2026-07-02 07:50:38+00:00")
+
+    assert result["newer_in_pair"] is None
+    assert result["pair_verdict"] == "同時刻"
+
+
+def test_timestampが欠けていれば比較不能(config):
+    result = hint(config, None, "2026-07-02 07:50:38+00:00")
+
+    assert result["newer_in_pair"] is None
+    assert result["pair_verdict"] == "比較不能"
+    # 相手の値は分かるので出す。片方が欠けていることが見えるべき。
+    assert result["partner_timestamp"] == "2026-07-02 07:50:38+00:00"
+
+
+def test_解釈できない日時も比較不能(config):
+    result = hint(config, "いつか", "2026-07-02 07:50:38+00:00")
+
+    assert result["pair_verdict"] == "比較不能"
+
+
+def test_相手が同じ画像に居なければ何も返さない(config):
+    """D05（クロスデータセット重複）の相手は別画像にいるので引けない。"""
+    own = make_record("A")
+    result = _duplicate_hint(own, make_pair_decision(config, "B"), {"A": own})
+
+    assert result == {}
+
+
+def test_重複ペアでなければ何も返さない(config):
+    own = make_record("A")
+    result = _duplicate_hint(own, make_pair_decision(config, None), {"A": own})
+
+    assert result == {}
+
+
+def test_採否がまだ無ければ何も返さない(config):
+    assert _duplicate_hint(make_record("A"), None, {}) == {}
+
+
+@pytest.mark.parametrize(
+    "seconds,expected",
+    [
+        (0, "0秒"),
+        (14, "14秒"),
+        (59, "59秒"),
+        (60, "1分"),
+        (3599, "59分"),
+        (3600, "1時間"),
+        (86399, "23時間"),
+        (86400, "1日"),
+        (86400 * 3, "3日"),
+        (-14, "14秒"),  # 符号は pair_verdict の文言側で表す
+    ],
+)
+def test_経過時間の丸め(seconds, expected):
+    """「14秒差」と「3日差」の違いが判断を分ける。桁は揃えない。"""
+    assert _elapsed_ja(seconds) == expected
