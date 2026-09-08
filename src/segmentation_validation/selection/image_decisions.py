@@ -41,6 +41,10 @@ class ImageReason(StrEnum):
     NEGATIVE_CASE = "negative_case"
     # 未アノテーションのビュー。側面像かどうか目視で判断する。
     REVIEW_REQUIRED = "review_required"
+    # series全体にアノテーションが無く、正常例のラベルも無い（単独型）。
+    # 所見ラベルの手掛かりが一切無い候補プール画像で、1枚ずつ目視するのは
+    # 非現実的な件数になる（実測1万件超）。開発データには使わない方針。
+    UNANNOTATED_ORPHAN_UNUSED = "unannotated_orphan_unused"
     # 検証対象外（分類はできたが目視に回さない設定）
     KEPT_WITHOUT_REVIEW = "kept_without_review"
 
@@ -114,9 +118,11 @@ def build_image_decisions(
 
     1. human decision がある → それ
     2. annotation を持つ → keep（annotation 側で個別に判定済み）
-    3. 目視対象の画像レベル Issue がある → pending
-    4. 正常例 → keep（陰性サンプル）
-    5. それ以外 → keep（目視に回さない設定のもの）
+    3. 単独型の未アノテーション（series全体に所見の手掛かりが無い） → exclude
+       （開発データには使わない方針。1万件超あり目視は非現実的）
+    4. 目視対象の画像レベル Issue がある → pending
+    5. 正常例 → keep（陰性サンプル）
+    6. それ以外 → keep（目視に回さない設定のもの）
     """
     human = human or {}
     annotated_series = {(g.dataset_id, g.study, g.series) for g in groups if g.records}
@@ -148,6 +154,10 @@ def build_image_decisions(
         elif group.records:
             decision = Decision.KEEP
             reason = ImageReason.HAS_ANNOTATIONS.value
+            source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
+        elif image_class is ImageClass.UNANNOTATED_ORPHAN:
+            decision = Decision.EXCLUDE
+            reason = ImageReason.UNANNOTATED_ORPHAN_UNUSED.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
         elif needs_review:
             decision = Decision.PENDING

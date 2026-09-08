@@ -207,14 +207,18 @@ class DecisionPolicyConfig:
     #
     #   unannotated_view    アノテーション済み study の2枚目以降（実測33枚）。
     #                       側面像なら開発データから除外が必要なので目視で判断する
-    #   unannotated_orphan  series 全体が未アノテーションで正常例ラベルも無い（実測0枚）
+    #   unannotated_orphan  series 全体が未アノテーションで正常例ラベルも無い
+    #                       （実測10,558枚。kaggle_pneumothorax 由来のデータセットで
+    #                       大量に発生する）。1枚ずつの目視は非現実的な件数であり
+    #                       所見の手掛かりも無いため、目視には回さず
+    #                       ``image_decisions.py`` が自動で exclude する
+    #                       （``ImageReason.UNANNOTATED_ORPHAN_UNUSED``）。
+    #                       ここに足しても効果は無い
     #   negative_case       正常例（No Findings）。実測187枚。
     #                       既定では目視に回さない —— DICOMも実在し陰性症例として
     #                       明示されているため。「所見の見落としが無いか」まで
     #                       確認したい場合はここに追加する
-    review_image_classes: list[str] = field(
-        default_factory=lambda: ["unannotated_view", "unannotated_orphan"]
-    )
+    review_image_classes: list[str] = field(default_factory=lambda: ["unannotated_view"])
 
 
 @dataclass(frozen=True)

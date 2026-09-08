@@ -105,6 +105,19 @@ def test_未アノテーションのビューはpendingになる(config):
     assert by_file["F1"].final_decision is Decision.KEEP
 
 
+def test_単独型の未アノテーションは自動exclude(config):
+    """★開発データに使わない方針。1万件超あり目視は非現実的。"""
+    unannotated = make_group((), file="F3")
+    issues = [make_issue("M09_UNANNOTATED_SERIES", geometry_uid=None, file="F3")]
+
+    d = only(build_image_decisions([unannotated], issues, config))
+
+    assert d.final_decision is Decision.EXCLUDE
+    assert d.reason == ImageReason.UNANNOTATED_ORPHAN_UNUSED.value
+    assert d.review_status is ReviewStatus.NOT_NEEDED
+    assert d.image_class == ImageClass.UNANNOTATED_ORPHAN.value
+
+
 def test_目視に回す分類はconfigで変えられる(config):
     """正常例187枚も見たくなったら config に足すだけで済むこと。"""
     groups = [make_group((), case_labels=(NORMAL,))]
