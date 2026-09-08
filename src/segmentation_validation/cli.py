@@ -99,6 +99,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("report", help="summary.md を書き出す")
     sub.add_parser("gui", help="ブラウザで見るダッシュボードHTMLを書き出す")
 
+    serve = sub.add_parser(
+        "serve", help="ダッシュボードを常駐サーバーで配信する（上げっぱなしにする）"
+    )
+    serve.add_argument(
+        "--port", type=int, default=None, help="既定は config の gui.port（8899）"
+    )
+    serve.add_argument("--host", default=None, help="既定は 127.0.0.1")
+    serve.add_argument(
+        "--no-refresh",
+        action="store_true",
+        help="ブラウザからの更新を無効にする（閲覧専用にする）",
+    )
+
     build = sub.add_parser(
         "build-dataset", help="採否マスタから development.json を生成する"
     )
@@ -178,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         "select": _select,
         "report": _report,
         "gui": _gui,
+        "serve": _serve,
         "build-dataset": _build_dataset,
         "review": _review,
     }
@@ -500,21 +514,29 @@ def _report(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _gui(config: Config, args: argparse.Namespace) -> int:
+def build_dashboard(config: Config, out_dir: Path) -> Path:
+    """``out_dir`` の成果物から ``dashboard.html`` を作り直してパスを返す。
+
+    ``gui`` サブコマンドと常駐サーバー（``serve``）の共通経路。``serve`` からは
+    この関数を注入して呼ぶ（``report/serve.py`` が cli を import しないため）。
+
+    成果物が足りなければ :class:`FileNotFoundError` を投げる。``serve`` は
+    ブラウザへ 409 として返し、``gui`` はメッセージにしてから exit する。
+    """
     from .checks import ALL_CHECKS
     from .report.gui import build_payload, write_dashboard
 
-    context = _load_context(config)
-    if context is None:
-        return EXIT_FAILURE
-    out_dir = config.validation_dir / _fingerprint(config)
     if not (out_dir / "issues.json").exists():
-        logger.error("issues.json が無い。先に check を実行する")
-        return EXIT_FAILURE
+        raise FileNotFoundError(f"issues.json が無い。先に check を実行する: {out_dir}")
     decisions = _read_selection(out_dir / "selection_decisions.json")
     if not decisions:
-        logger.error("selection_decisions.json が無い。先に select を実行する")
-        return EXIT_FAILURE
+        raise FileNotFoundError(
+            f"selection_decisions.json が無い。先に select を実行する: {out_dir}"
+        )
+
+    context = _load_context(config)
+    if context is None:
+        raise FileNotFoundError("対象JSONを読めない。list-sources で確認する")
 
     payload = build_payload(
         config,
@@ -523,16 +545,40 @@ def _gui(config: Config, args: argparse.Namespace) -> int:
         ALL_CHECKS,
         dict(context.masks),
         dict(context.files),
-        _fingerprint(config),
+        out_dir.name,
         population=_population(context.groups),
         image_decisions=_read_image_decisions(out_dir / "image_decisions.json"),
     )
     target = out_dir / "dashboard.html"
     write_dashboard(target, payload, config)
+    return target
+
+
+def _gui(config: Config, args: argparse.Namespace) -> int:
+    out_dir = config.validation_dir / _fingerprint(config)
+    try:
+        target = build_dashboard(config, out_dir)
+    except FileNotFoundError as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
     size = target.stat().st_size / 1024
     logger.info("dashboard.html (%.0f KB) -> %s", size, target)
-    logger.info("  ブラウザで開くか、Artifact として公開する")
+    logger.info("  `serve` で常駐サーバーから開くか、ブラウザで直接開く")
     return EXIT_OK
+
+
+def _serve(config: Config, args: argparse.Namespace) -> int:
+    from .report.serve import serve_forever
+
+    started = serve_forever(
+        config,
+        renderer=build_dashboard,
+        overrides=list(args.overrides),
+        host=args.host or config.gui.host,
+        port=args.port or config.gui.port,
+        allow_refresh=config.gui.allow_refresh and not args.no_refresh,
+    )
+    return EXIT_OK if started else EXIT_FAILURE
 
 
 def _build_dataset(config: Config, args: argparse.Namespace) -> int:

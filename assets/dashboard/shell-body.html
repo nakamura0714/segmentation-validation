@@ -10,6 +10,17 @@
     </div>
     <div style="display:flex;flex-direction:column;gap:12px;align-items:flex-end">
       <button class="theme-btn" id="theme">配色を切り替え</button>
+      <!-- 常駐サーバー（`serve`）経由で開いたときだけ出る。単体HTMLとして
+           file:// で開いたときは /api/status が取れないので隠したままにする。 -->
+      <div class="refresh" id="refresh" hidden>
+        <div class="refresh-row">
+          <button id="refresh-html">HTMLを再構成</button>
+          <button id="refresh-full">フル更新</button>
+        </div>
+        <p class="refresh-note" id="refresh-note"></p>
+        <p class="refresh-warn" id="refresh-warn" hidden></p>
+        <pre class="refresh-log" id="refresh-log" hidden></pre>
+      </div>
       <div class="verdict">
         <span class="dot pending" aria-hidden="true"></span>
         <span><strong>development.json は生成できない</strong><br>
@@ -73,6 +84,52 @@
           </tr></thead><tbody></tbody></table>
         </div>
       </figure>
+    </div>
+  </section>
+
+  <section id="sec-cases">
+    <div class="sec-head">
+      <h2>症例で探す</h2>
+      <p>患者1人 = 1行。<b>exclude がどの施設に出ているか</b>を追うための表。
+         行をクリックすると、その患者の annotation と目視対象の画像が開く。</p>
+    </div>
+    <p class="note-line">annotation を持たない患者もここには行がある
+      （<span class="mono">selection_decisions</span> には1行も現れないが、
+      <span class="mono">image_decisions</span> 側で exclude になった画像はここでしか追えない）。
+      既定は <b>exclude が多い順</b>。列見出しをクリックすると並べ替わる。</p>
+    <div class="filters">
+      <label for="f-c-inst">施設</label>
+      <select id="f-c-inst"><option value="">すべて</option></select>
+      <label for="f-c-st">症例状態</label>
+      <select id="f-c-st"><option value="">すべて</option></select>
+      <label for="f-c-ds">データセット</label>
+      <select id="f-c-ds"><option value="">すべて</option></select>
+      <input id="f-c-q" type="search" placeholder="patient_id / study / file で検索" aria-label="症例を検索">
+      <span id="f-c-active"></span>
+    </div>
+    <p class="count-line" id="c-count"></p>
+    <div class="tbl-scroll">
+      <table id="tbl-casehunt">
+        <thead><tr>
+          <th data-sort="inst">施設</th><th data-sort="pat">patient_id</th>
+          <th class="r" data-sort="stu">study</th><th class="r" data-sort="img">画像</th>
+          <th class="r" data-sort="ann">annotation</th><th class="r" data-sort="keep">keep</th>
+          <th class="r" data-sort="exc">exclude</th><th class="r" data-sort="rev">要目視</th>
+          <th data-sort="st">状態</th><th>除外理由</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="more"><button id="c-more" hidden></button></div>
+    <div class="case-block">
+      <span class="eyebrow">施設ごとの内訳 — 絞り込みに連動する</span>
+      <div class="tbl-scroll">
+        <table id="tbl-caseinst"><thead><tr>
+          <th>施設</th><th class="r">患者</th><th class="r">exclude を含む患者</th>
+          <th class="r">annotation exclude</th><th class="r">画像 exclude</th>
+          <th class="r">要目視の患者</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
     </div>
   </section>
 
@@ -164,7 +221,7 @@
       <select id="f-inst"><option value="">すべて</option></select>
       <label for="f-ds">データセット</label>
       <select id="f-ds"><option value="">すべて</option></select>
-      <input id="f-q" type="search" placeholder="geometry_uid / study / file で検索" aria-label="検索">
+      <input id="f-q" type="search" placeholder="patient / geometry_uid / study / file で検索" aria-label="検索">
       <span id="f-active"></span>
     </div>
     <p class="count-line" id="count"></p>

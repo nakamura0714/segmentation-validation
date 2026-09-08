@@ -152,7 +152,7 @@ selection_decisions.csv : final_decision = keep         ← 開発データに�
 | `summary.md` | 検出件数・判定不能の理由・参照マスクのカバレッジ・施設別/アノテータ別の偏り | — |
 | `selection_summary.md` | **開発データを作ってよい状態か** | — |
 | `precision.md` | 自動ルールのうち何割が本当に不正だったか | check ごと |
-| `dashboard.html` | 以上をブラウザで辿る | — |
+| `dashboard.html` | 以上をブラウザで辿る（`serve` で常駐配信できる） | — |
 | `development.json` | keep だけを反映した開発用データ | 元JSONと同一スキーマ |
 
 出力先は `output/validation/<fingerprint>/` と `output/development/<dataset>/<version>/`。
@@ -309,8 +309,62 @@ uv run segmentation-validation gui      # → dashboard.html（単一HTML・807K
 `dashboard.html` はブラウザで開く。JSON/CSV より速く全体が掴める。
 含まれるもの: 採否の流れ（症例数つき）/ 症例単位の合格数 / check 別の pending
 （annotation 数と画像枚数の両方）/ **面積分布と閾値** / 体外領域の裾50点 /
-M・D・S 系統ごとに開閉できる check 台帳 / annotation の絞り込み / 用語解説。
+M・D・S 系統ごとに開閉できる check 台帳 / **症例（患者）単位の一覧** /
+annotation の絞り込み / 用語解説。
 外部依存は Google Fonts のみ（面積分布などのグラフはここにしか出ない）。
+
+「**exclude がどの施設に出ているか**」は「症例で探す」の節で追う。患者1人=1行で、
+施設・症例状態・データセットで絞り込み、patient_id で検索できる。
+annotation を持たない患者もここには行があるので、`image_decisions` 側で
+exclude になった画像（実測33枚。27枚が `nagoya_daiichi`）もここから辿れる。
+
+### 3.5.1 常駐サーバーで見る（`serve`）
+
+`dashboard.html` はファイルを直接開いても動くが、**上げっぱなしにする常駐
+サーバー**を用意してある。ターミナルから1回起動するだけでよい。
+
+```bash
+nohup uv run segmentation-validation serve > output/dashboard_serve.log 2>&1 &
+```
+
+→ <http://localhost:8899/dashboard.html>（ポートは config の `gui.port`）。
+`ssh -L 8899:localhost:8899 <本サーバー>` でトンネルを張って開く。
+**インターネットへ公開しないこと。**
+
+jupyter のセルからは起動しない。**カーネル内にサーバーを立てるとカーネル再起動で
+止められなくなり**（`Address already in use` のまま回復できない）、配信先が
+起動時点のディレクトリに固定されるので**データセットを足すと古い成果物を
+配信し続ける**。`serve` は配信先を**リクエストごとに**解決するので、
+データセットを足しても再起動が要らない。
+
+サーバー経由で開くとページ右上に更新ボタンが2つ出る（ファイルを直接開いたときは
+出ない）。
+
+| ボタン | 中身 | 目安 |
+|---|---|---|
+| HTMLを再構成 | ディスク上の成果物から `dashboard.html` を作り直す | 数秒 |
+| フル更新 | `review export` → `select` → `report` → `gui` を順に実行 | 数分 |
+
+自分で `select` を回したあとは、**ページを再読み込みするだけ**でよい
+（成果物のほうが新しいことを検知して作り直す）。ログは `output/dashboard_serve.log`。
+
+`datasets.exclude` などで絞り込んでいるなら、**起動時に同じ `--set` を渡す**こと。
+フル更新のサブプロセスへそのまま引き継がれる。
+
+```bash
+nohup uv run segmentation-validation \
+  --set 'datasets.exclude=["01331","PTE_CX_MT_PI3"]' \
+  serve > output/dashboard_serve.log 2>&1 &
+```
+
+主なオプション: `--port` / `--host` / `--no-refresh`（閲覧専用にする）。
+ポートが埋まっていれば掴んでいるプロセスの PID を出して exit 2 で止まる。
+
+> **fingerprint が変わると目視判定は引き継がれない。** データセットを1本足すと
+> 出力先が別ディレクトリになり、`review/review_decisions.json` も新しい空の場所を
+> 指す。`serve` は状態表示に「設定が指す fingerprint」「配信中の fingerprint」
+> 「人間の判定の件数」を出すので、0件になっていれば気づける。旧 fingerprint の
+> 判定を使うには `select --review-decisions <旧fpのパス>` で明示的に渡す。
 
 ### 3.6 FiftyOne で目視する
 
@@ -1137,6 +1191,7 @@ check                                       チェック実行 → issues
 select                                      採否確定 → selection / image decisions
 report                                      summary.md / area_distribution
 gui                                         dashboard.html
+serve                                       dashboard.html を常駐サーバーで配信（更新ボタンつき）
 review build / launch / status              目視レビュー
 review export / import / precision          判定の往復と答え合わせ
 build-dataset                               development.json

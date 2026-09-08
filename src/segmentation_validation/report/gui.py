@@ -267,7 +267,9 @@ def case_rows(
         files = {d.file_uid for d in members} | {i.file_uid for i in images}
 
         # 除外理由。同じ理由が何度も出るので集合にしてから並べる。
-        reasons = sorted({d.reason for d in members if d.final_decision is Decision.EXCLUDE})
+        reasons = sorted(
+            {d.reason for d in members if d.final_decision is Decision.EXCLUDE}
+        )
         # 目視で追う必要がある画像だけ入れ子で持つ。keep の画像は行数が多く、
         # 内訳を開いても読めないので載せない（実測 keep 1050 / exclude 33）。
         flagged = [

@@ -411,7 +411,9 @@ function matches(r) {
     if (!has) return false;
   }
   const q = $("#f-q").value.trim().toLowerCase();
-  if (q && !(r[R.UID].toLowerCase().includes(q) || r[R.STUDY].toLowerCase().includes(q)
+  // patient_id も対象にする。症例の表からここへ patient_id で降りてくるため。
+  if (q && !(r[R.UID].toLowerCase().includes(q) || r[R.PAT].toLowerCase().includes(q)
+          || r[R.STUDY].toLowerCase().includes(q)
           || r[R.FILE].toLowerCase().includes(q))) return false;
   return true;
 }
@@ -550,3 +552,402 @@ $("#f-q").addEventListener("input", apply);
 // 開いた時点で「対応が必要な集合」を見せる
 selDec.value = "pending";
 apply();
+
+/* ── 症例で探す。「exclude がどの施設に出ているか」を追う ── */
+// C の列位置。report/gui.py の case_rows() の並びと対応
+const C = { PAT:0, INST:1, DS:2, STU:3, IMG:4, ANN:5, KEEP:6, EXC:7, PEND:8, UNC:9,
+            ST:10, RSN:11, IEXC:12, IREV:13, FLAG:14 };
+const CT = D.cases_table || { rows: [], status_order: [], status_labels: {} };
+const caseRows = CT.rows;
+// annotation を patient で引けるようにしておく（内訳の展開で使う）。
+// rows の DS 列と case_rows の DS 列は **同じ ds 語彙のインデックス**
+// （report/gui.py の build_payload が同じ _Vocab を両方へ渡している）。
+// 別々の語彙にすると、ここが黙って空振りして内訳が出なくなる。
+const annByCase = new Map();
+for (const r of rows) {
+  const key = `${r[R.DS]}/${r[R.PAT]}`;
+  if (!annByCase.has(key)) annByCase.set(key, []);
+  annByCase.get(key).push(r);
+}
+const cRev = (r) => r[C.PEND] + r[C.UNC] + r[C.IREV];
+const cExc = (r) => r[C.EXC] + r[C.IEXC];
+const C_KEYS = {
+  inst: (r) => V.inst[r[C.INST]], pat: (r) => r[C.PAT], stu: (r) => r[C.STU],
+  img: (r) => r[C.IMG], ann: (r) => r[C.ANN], keep: (r) => r[C.KEEP],
+  exc: cExc, rev: cRev, st: (r) => CT.status_order[r[C.ST]],
+};
+
+const cInst = $("#f-c-inst"), cSt = $("#f-c-st"), cDs = $("#f-c-ds");
+const cInstCount = new Map();
+for (const r of caseRows) {
+  const n = V.inst[r[C.INST]];
+  cInstCount.set(n, (cInstCount.get(n) || 0) + 1);
+}
+[...cInstCount].sort((a, b) => b[1] - a[1])
+  .forEach(([n, k]) => cInst.append(new Option(`${n} (${k} 患者)`, n)));
+const cStCount = new Map();
+for (const r of caseRows) {
+  const s = CT.status_order[r[C.ST]];
+  cStCount.set(s, (cStCount.get(s) || 0) + 1);
+}
+CT.status_order.forEach((s) => {
+  if (cStCount.get(s)) cSt.append(new Option(`${CT.status_labels[s]} (${cStCount.get(s)})`, s));
+});
+V.ds.forEach((n) => cDs.append(new Option(n, n)));
+
+let cShown = 0, cFiltered = [];
+let cSortKey = null, cSortAsc = false;
+const C_PAGE = 120;
+const tbCh = document.querySelector("#tbl-casehunt tbody");
+
+function cMatches(r) {
+  if (cInst.value && V.inst[r[C.INST]] !== cInst.value) return false;
+  if (cSt.value && CT.status_order[r[C.ST]] !== cSt.value) return false;
+  if (cDs.value && V.ds[r[C.DS]] !== cDs.value) return false;
+  const q = $("#f-c-q").value.trim().toLowerCase();
+  if (!q) return true;
+  if (r[C.PAT].toLowerCase().includes(q)) return true;
+  // study / file でも引けるようにする。患者IDが手元に無いことがある。
+  if (r[C.FLAG].some((f) => f[0].toLowerCase().includes(q)
+                         || f[1].toLowerCase().includes(q))) return true;
+  const anns = annByCase.get(`${r[C.DS]}/${r[C.PAT]}`) || [];
+  return anns.some((a) => a[R.STUDY].toLowerCase().includes(q)
+                       || a[R.FILE].toLowerCase().includes(q)
+                       || a[R.UID].toLowerCase().includes(q));
+}
+
+function caseRow(r) {
+  const tr = el("tr", "case");
+  tr.append(el("td", null, V.inst[r[C.INST]]));
+  tr.append(el("td", "mono", r[C.PAT]));
+  tr.append(el("td", "r num", String(r[C.STU])));
+  tr.append(el("td", "r num", String(r[C.IMG])));
+  tr.append(el("td", "r num", String(r[C.ANN])));
+  tr.append(el("td", `r num${r[C.KEEP] ? "" : " zeroish"}`, String(r[C.KEEP])));
+  // annotation と画像の exclude は別物なので併記する（1817行 vs 1083枚）。
+  const exc = el("td", `r num${cExc(r) ? "" : " zeroish"}`);
+  exc.textContent = String(r[C.EXC]);
+  if (r[C.IEXC]) {
+    const img = el("span", null, ` +${r[C.IEXC]}画像`);
+    img.style.cssText = "font-size:10.5px;color:var(--exclude)";
+    exc.append(img);
+  }
+  tr.append(exc);
+  tr.append(el("td", `r num${cRev(r) ? "" : " zeroish"}`, String(cRev(r))));
+  const st = CT.status_order[r[C.ST]];
+  const stTd = el("td");
+  stTd.append(el("span", `st ${st}`, CT.status_labels[st]));
+  tr.append(stTd);
+  const rsn = el("td");
+  const flags = el("div", "case-flags");
+  const seen = new Set(r[C.RSN].map((i) => V.rsn[i]));
+  for (const f of r[C.FLAG]) seen.add(V.rsn[f[4]]);
+  if (!seen.size) {
+    const dash = el("span", null, "—");
+    dash.style.color = "var(--ink-3)";
+    flags.append(dash);
+  }
+  for (const name of seen) {
+    const sp = el("span", "chip k-record", name);
+    sp.style.fontSize = "10.5px";
+    flags.append(sp);
+  }
+  rsn.append(flags);
+  tr.append(rsn);
+
+  let open = null;
+  tr.addEventListener("click", () => {
+    if (open) { open.remove(); open = null; return; }
+    open = el("tr", "detail");
+    const td = el("td"); td.colSpan = 10;
+    const box = el("div", "detail-in");
+    const dl = el("dl");
+    const put = (k, v) => { dl.append(el("dt", null, k)); dl.append(el("dd", "mono", v)); };
+    put("patient_id", r[C.PAT]);
+    put("dataset", V.ds[r[C.DS]]);
+    put("施設", V.inst[r[C.INST]]);
+    put("annotation", `${r[C.ANN]} 件　keep ${r[C.KEEP]} / exclude ${r[C.EXC]}`
+      + ` / pending ${r[C.PEND]} / uncertain ${r[C.UNC]}`);
+    put("画像", `${r[C.IMG]} 枚　exclude ${r[C.IEXC]} / 目視待ち ${r[C.IREV]}`);
+    box.append(dl);
+
+    const anns = annByCase.get(`${r[C.DS]}/${r[C.PAT]}`) || [];
+    const notKeep = anns.filter((a) => V.fd[a[R.FD]] !== "keep");
+    if (notKeep.length) {
+      const h = el("div");
+      const hdr = el("span", "eyebrow", `keep でない annotation ${notKeep.length}件`);
+      hdr.style.cssText = "display:block;margin-bottom:7px";
+      h.append(hdr);
+      for (const a of notKeep) {
+        const line = el("div");
+        line.style.cssText = "font-size:12.5px;margin-bottom:4px";
+        line.append(el("span", `dot ${V.fd[a[R.FD]]}`));
+        const text = el("span", "mono",
+          ` ${V.fd[a[R.FD]]}　${a[R.UID].slice(0, 8)}　${a[R.STUDY]} / ${a[R.FILE]}`
+          + `　${V.rsn[a[R.RSN]]}`);
+        text.style.fontSize = "11.5px";
+        line.append(text);
+        h.append(line);
+      }
+      box.append(h);
+    }
+    if (r[C.FLAG].length) {
+      const h = el("div");
+      const hdr = el("span", "eyebrow", `keep でない画像 ${r[C.FLAG].length}件`);
+      hdr.style.cssText = "display:block;margin-bottom:7px";
+      h.append(hdr);
+      for (const f of r[C.FLAG]) {
+        const line = el("div");
+        line.style.cssText = "font-size:12.5px;margin-bottom:4px";
+        line.append(el("span", `dot ${f[3]}`));
+        const text = el("span", "mono",
+          ` ${f[3]}　${f[1]} / ${f[0]}　${f[2]}　${V.rsn[f[4]]}`);
+        text.style.fontSize = "11.5px";
+        line.append(text);
+        h.append(line);
+      }
+      box.append(h);
+    }
+    if (!notKeep.length && !r[C.FLAG].length) {
+      const p = el("p", null, "全 annotation・全画像が keep。除外も目視待ちも無い。");
+      p.style.cssText = "margin:0;font-size:12.5px;color:var(--ink-2)";
+      box.append(p);
+    }
+    const jump = el("button", null, "この患者の annotation を下の一覧で見る");
+    jump.style.cssText = "font:500 12px var(--f-body);color:var(--ink);"
+      + "background:var(--surface);border:1px solid var(--rule-strong);"
+      + "padding:6px 12px;cursor:pointer;justify-self:start";
+    jump.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selDec.value = ""; selCheck.value = ""; selInst.value = ""; selDs.value = "";
+      $("#f-q").value = r[C.PAT];
+      apply();
+      document.getElementById("tbl-ann").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    box.append(jump);
+    td.append(box); open.append(td);
+    tr.after(open);
+  });
+  return tr;
+}
+
+function cInstTable() {
+  // 絞り込み後の集合で数える。「asahikawa に絞ったら asahikawa だけ」になる。
+  const per = new Map();
+  for (const r of cFiltered) {
+    const name = V.inst[r[C.INST]];
+    const e = per.get(name)
+      || { patients: 0, withExc: 0, ann: 0, img: 0, review: 0 };
+    e.patients += 1;
+    if (cExc(r)) e.withExc += 1;
+    e.ann += r[C.EXC];
+    e.img += r[C.IEXC];
+    if (cRev(r)) e.review += 1;
+    per.set(name, e);
+  }
+  const tb = document.querySelector("#tbl-caseinst tbody");
+  tb.replaceChildren();
+  const sorted = [...per].sort((a, b) => (b[1].ann + b[1].img) - (a[1].ann + a[1].img)
+    || b[1].patients - a[1].patients);
+  if (!sorted.length) {
+    const tr = el("tr");
+    const td = el("td", null, "該当なし");
+    td.colSpan = 6; td.style.color = "var(--ink-3)";
+    tr.append(td); tb.append(tr);
+    return;
+  }
+  for (const [name, e] of sorted) {
+    const tr = el("tr");
+    tr.append(el("td", null, name));
+    tr.append(el("td", "r num", e.patients.toLocaleString()));
+    tr.append(el("td", `r num${e.withExc ? "" : " zeroish"}`, String(e.withExc)));
+    tr.append(el("td", `r num${e.ann ? "" : " zeroish"}`, String(e.ann)));
+    tr.append(el("td", `r num${e.img ? "" : " zeroish"}`, String(e.img)));
+    tr.append(el("td", `r num${e.review ? "" : " zeroish"}`, String(e.review)));
+    tb.append(tr);
+  }
+}
+
+function cApply() {
+  cFiltered = caseRows.filter(cMatches);
+  if (cSortKey) {
+    const key = C_KEYS[cSortKey];
+    cFiltered.sort((a, b) => {
+      const x = key(a), y = key(b);
+      const cmp = typeof x === "string" ? x.localeCompare(y) : x - y;
+      return cSortAsc ? cmp : -cmp;
+    });
+  }
+  tbCh.replaceChildren();
+  cShown = 0;
+  cPush();
+  cInstTable();
+  const parts = [];
+  if (cInst.value) parts.push(cInst.value);
+  if (cSt.value) parts.push(CT.status_labels[cSt.value]);
+  if (cDs.value) parts.push(cDs.value);
+  const act = $("#f-c-active");
+  act.replaceChildren();
+  if (parts.length) {
+    const s = el("span", "active-filter");
+    s.append(el("span", null, parts.join(" · ")));
+    const b = el("button", null, "×");
+    b.title = "絞り込みを解除";
+    b.addEventListener("click", () => {
+      cInst.value = cSt.value = cDs.value = "";
+      $("#f-c-q").value = ""; cApply();
+    });
+    s.append(b); act.append(s);
+  }
+}
+
+function cPush() {
+  const next = cFiltered.slice(cShown, cShown + C_PAGE);
+  for (const r of next) tbCh.append(caseRow(r));
+  cShown += next.length;
+  $("#c-more").hidden = cShown >= cFiltered.length;
+  $("#c-more").textContent = `さらに表示（残り ${(cFiltered.length - cShown).toLocaleString()} 件）`;
+  const exc = cFiltered.filter((r) => cExc(r)).length;
+  const rev = cFiltered.filter((r) => cRev(r)).length;
+  $("#c-count").innerHTML = `<b>${cFiltered.length.toLocaleString()}</b> 患者が該当`
+    + `（うち <b>${exc.toLocaleString()}</b> 患者に exclude / `
+    + `<b>${rev.toLocaleString()}</b> 患者が要目視）　`
+    + `／ 全 ${caseRows.length.toLocaleString()} 患者　`
+    + `<span style="color:var(--ink-3)">${cShown.toLocaleString()} 件を表示中</span>`;
+}
+
+$("#c-more").addEventListener("click", cPush);
+[cInst, cSt, cDs].forEach((s) => s.addEventListener("change", cApply));
+$("#f-c-q").addEventListener("input", cApply);
+document.querySelectorAll("#tbl-casehunt th[data-sort]").forEach((th) => {
+  th.setAttribute("role", "button");
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    // 同じ列を2回押したら昇降が入れ替わる。数値列は多い順から始めたい。
+    cSortAsc = cSortKey === key ? !cSortAsc : ["inst", "pat", "st"].includes(key);
+    cSortKey = key;
+    document.querySelectorAll("#tbl-casehunt th[data-sort]")
+      .forEach((other) => other.removeAttribute("aria-sort"));
+    th.setAttribute("aria-sort", cSortAsc ? "ascending" : "descending");
+    cApply();
+  });
+});
+cApply();
+
+/* ── 更新パネル ──
+   常駐サーバー（`segmentation-validation serve`）経由で開いたときだけ動く。
+   file:// で単体HTMLとして開くと /api/status が取れないので、パネルは隠したまま
+   にする。「dashboard.html 1枚で完結する」という約束を壊さないため。 */
+const rBox = $("#refresh"), rNote = $("#refresh-note"), rWarn = $("#refresh-warn");
+const rLog = $("#refresh-log"), rHtml = $("#refresh-html"), rFull = $("#refresh-full");
+let rTimer = null, rInterval = 2000;
+// 「自分が始めた更新か」の記録。他タブが始めた更新で勝手に読み直さないため。
+// sessionStorage はプライベートウィンドウ等で例外を投げることがあるので包む。
+const rMine = {
+  get() { try { return sessionStorage.getItem("sv-job"); } catch { return null; } },
+  set(v) { try { sessionStorage.setItem("sv-job", v); } catch { /* 諦める */ } },
+  clear() { try { sessionStorage.removeItem("sv-job"); } catch { /* 諦める */ } },
+};
+
+function rTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+function rRender(s) {
+  const job = s.job;
+  const running = job && !job.finished_at;
+  rHtml.disabled = rFull.disabled = running || !s.allow_refresh;
+
+  if (running) {
+    rNote.textContent = `${job.mode === "full" ? "フル更新" : "HTML再構成"}中 — ${job.step}`;
+  } else if (job && job.ok === false) {
+    rNote.textContent = `更新が失敗した（${job.step}）。ログを確認する。`;
+  } else {
+    rNote.textContent = `最終生成 ${rTime(s.dashboard_mtime)}`
+      + (s.stale ? "　※成果物のほうが新しい。再読み込みで作り直される。" : "");
+  }
+  if (!s.allow_refresh) rNote.textContent += "（閲覧専用で起動している）";
+
+  // ログは実行中と失敗時だけ出す。成功したらリロードするので残しても見えない。
+  const showLog = running || (job && job.ok === false);
+  rLog.hidden = !showLog;
+  if (showLog) {
+    rLog.textContent = (job.lines || []).slice(-40).join("\n");
+    rLog.scrollTop = rLog.scrollHeight;
+  }
+
+  // fingerprint の食い違いは黙って隠さない。データセットを足すと出力先が変わり、
+  // 過去の目視判定（review_decisions.json）が引き継がれないため。
+  const warn = [];
+  if (s.served_reason === "newest" && s.config_fingerprint !== s.served_fingerprint) {
+    warn.push(`いまの設定は ${s.config_fingerprint} を指しているが、`
+      + `そこに select の成果物が無いので ${s.served_fingerprint} を表示している。`);
+  }
+  if (s.served_reason === "missing") {
+    warn.push("成果物がまだ無い。check → select を実行する。");
+  }
+  const rd = s.review_decisions;
+  if (rd && rd.annotations === 0 && rd.images === 0) {
+    warn.push("この出力先には人間の判定が0件。データセットを足した直後なら、"
+      + "旧 fingerprint の review_decisions.json を select --review-decisions で渡す。");
+  }
+  rWarn.hidden = !warn.length;
+  rWarn.textContent = warn.join(" ");
+}
+
+async function rPoll() {
+  let s;
+  try {
+    const res = await fetch("/api/status", { cache: "no-store" });
+    if (!res.ok) throw new Error(String(res.status));
+    s = await res.json();
+  } catch {
+    // サーバーが落ちた / file:// で開いている。パネルを消して静かに諦める。
+    rBox.hidden = true;
+    if (rTimer) { clearInterval(rTimer); rTimer = null; }
+    return;
+  }
+  rBox.hidden = false;
+  rInterval = (s.poll_interval_sec || 2) * 1000;
+  rRender(s);
+
+  const job = s.job;
+  if (job && !job.finished_at) {
+    if (!rTimer) rTimer = setInterval(rPoll, rInterval);
+  } else {
+    if (rTimer) { clearInterval(rTimer); rTimer = null; }
+    // 成功して終わった直後だけ読み直す。失敗はログを読ませたいので留まる。
+    if (job && job.ok && rMine.get() === job.started_at) {
+      rMine.clear();
+      location.reload();
+    }
+  }
+}
+
+async function rStart(mode) {
+  if (mode === "full" && !window.confirm(
+      "フル更新は review export → select → report → gui を順に実行する。\n"
+      + "FiftyOne と mongod に触るので数分かかり、目視結果の取り込みに失敗することもある。\n"
+      + "実行する？")) return;
+  rHtml.disabled = rFull.disabled = true;
+  try {
+    const res = await fetch(`/api/refresh?mode=${mode}`, { method: "POST" });
+    if (res.status === 409) { rNote.textContent = "更新がすでに走っている"; return; }
+    if (!res.ok) { rNote.textContent = `更新を開始できない（${res.status}）`; return; }
+    // 完了時にリロードしてよいジョブかを覚えておく。
+    const status = await fetch("/api/status", { cache: "no-store" });
+    const s = await status.json();
+    if (s.job) rMine.set(s.job.started_at);
+    rRender(s);
+  } catch (error) {
+    // ここで諦めるとボタンが disabled のまま残るので、ポーリングに任せる。
+    rNote.textContent = `更新の状態を取れない（${error}）`;
+  }
+  if (!rTimer) rTimer = setInterval(rPoll, rInterval);
+}
+
+rHtml.addEventListener("click", () => rStart("html"));
+rFull.addEventListener("click", () => rStart("full"));
+rPoll();

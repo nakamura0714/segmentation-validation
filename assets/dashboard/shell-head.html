@@ -273,4 +273,33 @@ tr.detail > td { background: var(--surface-2); padding: 0; }
 .callout p { margin: 0 0 7px; }
 .callout p:last-child { margin: 0; }
 .callout b { font-weight: 600; }
+
+/* ── 更新パネル。常駐サーバー（serve）経由のときだけ出る ── */
+.refresh { display: flex; flex-direction: column; gap: 7px; align-items: flex-end;
+  max-width: 420px; }
+.refresh-row { display: flex; gap: 7px; }
+.refresh button { font: 500 12px var(--f-body); color: var(--ink); background: var(--surface);
+  border: 1px solid var(--rule-strong); padding: 6px 12px; cursor: pointer; }
+.refresh button:hover:not(:disabled) { background: var(--surface-2); }
+.refresh button:disabled { color: var(--ink-3); cursor: progress; }
+.refresh-note { margin: 0; font: 400 11.5px var(--f-body); color: var(--ink-2);
+  text-align: right; }
+.refresh-warn { margin: 0; padding: 5px 9px; font-size: 11.5px; text-align: right;
+  color: var(--sev-warning); border: 1px solid currentColor; }
+.refresh-log { margin: 0; max-height: 130px; width: 100%; overflow: auto;
+  padding: 7px 9px; background: var(--surface-2); border: 1px solid var(--rule);
+  font: 400 10.5px/1.45 var(--f-mono); color: var(--ink-2); white-space: pre-wrap;
+  word-break: break-all; text-align: left; }
+@media (max-width: 860px) { .refresh { align-items: flex-start; max-width: none; } }
+
+/* ── 症例で探す ── */
+tr.case { cursor: pointer; }
+.case-flags { display: flex; flex-wrap: wrap; gap: 3px 5px; }
+.st { font: 500 11px var(--f-body); white-space: nowrap; }
+.st.passed { color: var(--keep); }
+.st.partial { color: var(--exclude); }
+.st.all_excluded { color: var(--exclude); }
+.st.needs_review { color: var(--pending); }
+.st.no_annotation { color: var(--ink-3); }
+td.zeroish { color: var(--ink-3); }
 </style>

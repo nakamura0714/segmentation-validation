@@ -133,11 +133,17 @@ uv run segmentation-validation gui      # dashboard.html
 
 `dashboard.html`は`output/validation/<fingerprint>/`に生成される単一HTML。
 ブラウザで直接開けば見られる（サーバー不要）。手元のブラウザから開くには、
-本サーバー上で軽量HTTPサーバーを立ててポート転送する。
+本サーバー上で`serve`を上げてポート転送する。
 
 ```bash
-cd output/validation/<fingerprint>
-uv run python -m http.server 8899 --bind 127.0.0.1
+# プロジェクトルートで1回上げるだけ。上げっぱなしにする。
+# 絞り込んでいるなら同じ --set を渡す（フル更新のサブプロセスへ引き継がれる）
+nohup uv run segmentation-validation \
+  --set 'datasets.exclude=["01331","PTE_CX_MT_PI3"]' \
+  serve > output/dashboard_serve.log 2>&1 &
+
+# 止めるとき
+pkill -f 'segmentation-validation.*serve'
 ```
 
 手元PCの新しいターミナルで（または`~/.ssh/config`に`LocalForward`を書いておく）:
@@ -146,14 +152,43 @@ uv run python -m http.server 8899 --bind 127.0.0.1
 ssh -L 8899:localhost:8899 <本サーバー>
 ```
 
-ブラウザで`http://localhost:8899/dashboard.html`を開く。ノートブックから開く場合は
-[notebooks/pipeline.ipynb](../notebooks/pipeline.ipynb) の3.5節にこのサーバー起動を
-セル化してある。
+ブラウザで`http://localhost:8899/dashboard.html`を開く。
+**インターネットへ公開しないこと。**
+
+`cd output/validation/<fingerprint> && python -m http.server` でも見られるが、
+`serve`のほうが2点で優れている。
+
+- **配信先をリクエストごとに解決する。** データセットを足すとfingerprintが変わって
+  出力先ディレクトリも変わる。`http.server`は起動時のディレクトリに張り付くので、
+  古い成果物を配信し続ける。
+- **ページから更新を叩ける。** 右上の「HTMLを再構成」（数秒）と「フル更新」
+  （`review export`→`select`→`report`→`gui`、数分）。目視のあと
+  `select`を自分で回した場合は、ページを再読み込みするだけで作り直される。
+
+ノートブックから開く場合は
+[notebooks/pipeline.ipynb](../notebooks/pipeline.ipynb) の3.5節に、
+`serve`が上がっているかを見てリンクを出すセルがある（**セルはサーバーを立てない**。
+カーネル内に立てるとカーネル再起動で止められなくなるため）。
 
 ダッシュボードで確認できるもの: 採否の流れ（症例数つき）/ check別のpending /
 面積分布と閾値 / 体外領域の裾50点 / M・D・S系統ごとの check台帳 /
-annotationの絞り込み表。**最終的な合否（annotation単位のkeep/exclude/pending）は
-ここで一覧できる**。
+**症例（患者）単位の一覧** / annotationの絞り込み表。
+**最終的な合否（annotation単位のkeep/exclude/pending）はここで一覧できる**。
+
+### 4.1 exclude がどの施設に出ているかを見る
+
+「症例で探す」の節を使う。患者1人=1行で、施設・症例状態・データセットで絞り込み、
+patient_id（study / file / geometry_uid でも引ける）で検索できる。列見出しで並べ替わり、
+既定は exclude が多い順。表の下に**絞り込みに連動する施設別の内訳**が出る。
+
+annotation を持たない患者もここには行がある。`selection_decisions`は
+annotation単位（1817行）なので annotation の無い患者は1行も持たないが、
+`image_decisions`側でexcludeになった画像（実測33枚。27枚が`nagoya_daiichi`）は
+ここでしか追えない。annotationのexcludeと画像のexcludeは母数が違う（1817 vs 1083）
+ので、表では別カラムにしてある（`3 +1画像`のような表記）。
+
+行をクリックすると、その患者のkeepでないannotationとkeepでない画像が開く。
+「この患者のannotationを下の一覧で見る」を押すとannotation表がその患者で絞り込まれる。
 
 ## 5. データセットに異常が見つかったら
 
