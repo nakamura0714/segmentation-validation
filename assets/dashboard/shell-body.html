@@ -23,6 +23,11 @@
 
   <div class="flow">
     <span class="eyebrow">最終採否 — 1817 annotation の全量</span>
+    <div class="filters" style="margin:10px 0 4px">
+      <label for="f-flow-ct">所見</label>
+      <select id="f-flow-ct"><option value="">すべて</option></select>
+    </div>
+    <p class="note-line" style="margin:0 0 10px">所見を選ぶとこの内訳（バー・凡例・作業量）だけが絞り込まれる。下の一覧・症例単位の状態には連動しない。</p>
     <div class="flow-bar" id="flow" role="group" aria-label="採否の内訳。クリックで下の一覧を絞り込む"></div>
     <div class="flow-legend" id="flow-legend"></div>
     <p class="workload" id="workload"></p>
@@ -118,11 +123,19 @@
       <figure>
         <figcaption>S03 マスク面積の分布（1665件）</figcaption>
         <p class="note">log軸。単峰の連続分布で自然な切れ目が無い。破線がクラス族ごとの下限。</p>
+        <div class="filters" style="margin:0 0 12px">
+          <label for="f-area-ct">所見</label>
+          <select id="f-area-ct"><option value="">すべて</option></select>
+        </div>
         <div id="chart-area"></div>
       </figure>
       <figure>
         <figcaption>S05 体外領域の裾（判定できた1156件のうち50件）</figcaption>
         <p class="note">残り1106件は包含率 1.0（マージン10mm以内に完全に収まる）。点にカーソルを当てると症例が出る。</p>
+        <div class="filters" style="margin:0 0 12px">
+          <label for="f-outside-ct">所見</label>
+          <select id="f-outside-ct"><option value="">すべて</option></select>
+        </div>
         <div id="chart-outside"></div>
       </figure>
     </div>

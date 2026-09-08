@@ -9,6 +9,15 @@ const R = { UID:0, DS:1, INST:2, STUDY:3, FILE:4, TY:5, CT:6, USR:7, TS:8,
             DC:9, UC:10, FD:11, RSN:12, SRC:13, MSEV:14, AREA:15, NC:16,
             CONT:17, OUT:18, KEPT:19, DGRP:20, REF:21, PAT:22 };
 const rows = D.rows;
+function countCases(rs) {
+  const p = new Set(), s = new Set(), im = new Set();
+  for (const r of rs) {
+    p.add(`${r[R.DS]}/${r[R.PAT]}`);
+    s.add(`${r[R.DS]}/${r[R.STUDY]}`);
+    im.add(`${r[R.DS]}/${r[R.STUDY]}/${r[R.FILE]}`);
+  }
+  return { patients: p.size, studies: s.size, images: im.size, annotations: rs.length };
+}
 const issuesByUid = new Map();
 for (const [ci, uid, sev, st, msg, det] of D.issues) {
   if (!uid) continue;
@@ -42,12 +51,6 @@ if (POP.annotated) {
 document.getElementById("fp").textContent =
   `fingerprint ${D.meta.fingerprint} · ${D.meta.sources.length} データセット`;
 
-const PC = D.cases.pending;
-document.getElementById("workload").innerHTML =
-  `<b>目視の実作業量</b>　pending ${PC.annotations} annotation は `
-  + `<b>${PC.images} 画像</b>（study ${PC.studies} / 患者 ${PC.patients}）に含まれる。`
-  + `1画像に複数の annotation があるので、開く枚数は annotation 数より少ない。`;
-
 /* 採否ごとの症例数。レベル間で合計が一致しない（1症例が複数の採否を持つ）ので
    「その採否を含む症例数」と明記する。 */
 const REASON_NOTE = {
@@ -56,18 +59,67 @@ const REASON_NOTE = {
   pending: "目視待ち",
   uncertain: "見たが判断できなかったもの",
 };
-const legend = document.getElementById("flow-legend");
-V.fd.forEach((name) => {
-  const c = D.cases.by_decision[name];
-  const s = el("span");
-  const b = el("b", null, `${name} ${c.annotations.toLocaleString()}`);
-  s.append(el("span", `dot ${name}`), b);
-  const detail = c.annotations
-    ? `　${c.images} 画像 / ${c.studies} study / ${c.patients} 患者　— ${REASON_NOTE[name]}`
-    : `　— ${REASON_NOTE[name]}`;
-  s.append(el("span", null, detail));
-  legend.append(s);
-});
+
+/* ── 採否の流れバー・凡例・作業量。所見（f-flow-ct）で絞り込める ──
+   label==="" のときは既存どおり D.cases.* をそのまま使い、数値を据え置く。
+   所見を選んだときだけ rows から countCases() で再集計する。 */
+function renderFlow(label) {
+  const rs = label ? rows.filter((r) => (V.ct[r[R.CT]] || "(ラベルなし)") === label) : rows;
+  const byDecision = (name) => label
+    ? countCases(rs.filter((r) => V.fd[r[R.FD]] === name))
+    : D.cases.by_decision[name];
+  const pending = label ? byDecision("pending") : D.cases.pending;
+
+  document.getElementById("workload").innerHTML =
+    `<b>目視の実作業量</b>　pending ${pending.annotations} annotation は `
+    + `<b>${pending.images} 画像</b>（study ${pending.studies} / 患者 ${pending.patients}）に含まれる。`
+    + `1画像に複数の annotation があるので、開く枚数は annotation 数より少ない。`;
+
+  const legend = document.getElementById("flow-legend");
+  legend.replaceChildren();
+  V.fd.forEach((name) => {
+    const c = byDecision(name);
+    const s = el("span");
+    const b = el("b", null, `${name} ${c.annotations.toLocaleString()}`);
+    s.append(el("span", `dot ${name}`), b);
+    const detail = c.annotations
+      ? `　${c.images} 画像 / ${c.studies} study / ${c.patients} 患者　— ${REASON_NOTE[name]}`
+      : `　— ${REASON_NOTE[name]}`;
+    s.append(el("span", null, detail));
+    legend.append(s);
+  });
+
+  const segCount = [0, 0, 0, 0];
+  for (const r of rs) segCount[r[R.FD]]++;
+  const flow = $("#flow");
+  flow.replaceChildren();
+  V.fd.forEach((name, i) => {
+    if (!segCount[i]) return;
+    const b = el("button", "flow-seg");
+    b.dataset.s = name;
+    b.style.flex = segCount[i];
+    b.setAttribute("aria-pressed", "false");
+    b.title = `${name} ${segCount[i]} 件 — クリックで一覧を絞る`;
+    b.append(el("span", "v", segCount[i].toLocaleString()), el("span", "k", name));
+    b.addEventListener("click", () => {
+      const on = b.getAttribute("aria-pressed") === "true";
+      $("#f-dec").value = on ? "" : name;
+      apply();
+    });
+    flow.append(b);
+  });
+}
+renderFlow("");
+
+const flowSel = $("#f-flow-ct");
+const flowCtCount = new Map();
+for (const r of rows) {
+  const label = V.ct[r[R.CT]] || "(ラベルなし)";
+  flowCtCount.set(label, (flowCtCount.get(label) || 0) + 1);
+}
+[...flowCtCount].sort((a, b) => b[1] - a[1])
+  .forEach(([label, n]) => flowSel.append(new Option(`${label} (${n})`, label)));
+flowSel.addEventListener("change", () => renderFlow(flowSel.value));
 
 /* ── 配色の切り替え ── */
 $("#theme").addEventListener("click", () => {
@@ -78,25 +130,10 @@ $("#theme").addEventListener("click", () => {
   drawAll();
 });
 
-/* ── 採否の流れバー ── */
+/* decCount: #f-dec ドロップダウンの候補ラベルの件数表示に使う（グローバル・全所見合算）。
+   流れバー本体は renderFlow() が描画する。 */
 const decCount = [0, 0, 0, 0];
 for (const r of rows) decCount[r[R.FD]]++;
-const flow = $("#flow");
-V.fd.forEach((name, i) => {
-  if (!decCount[i]) return;
-  const b = el("button", "flow-seg");
-  b.dataset.s = name;
-  b.style.flex = decCount[i];
-  b.setAttribute("aria-pressed", "false");
-  b.title = `${name} ${decCount[i]} 件 — クリックで一覧を絞る`;
-  b.append(el("span", "v", decCount[i].toLocaleString()), el("span", "k", name));
-  b.addEventListener("click", () => {
-    const on = b.getAttribute("aria-pressed") === "true";
-    $("#f-dec").value = on ? "" : name;
-    apply();
-  });
-  flow.append(b);
-});
 
 /* ── 自動ルールの Precision。目視前は分母だけが埋まる ── */
 const PR = D.precision || {};

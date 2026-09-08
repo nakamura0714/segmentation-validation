@@ -85,10 +85,20 @@ function chartPending(host) {
 
 /* ── 2. 面積分布（log軸ヒストグラム＋クラス族の下限） ── */
 function chartArea(host) {
-  const areas = rows.map((r) => r[R.AREA]).filter((v) => v != null && v > 0);
+  const subset = ctSel.value
+    ? rows.filter((r) => (V.ct[r[R.CT]] || "(ラベルなし)") === ctSel.value)
+    : rows;
+  const areas = subset.map((r) => r[R.AREA]).filter((v) => v != null && v > 0);
+  if (!areas.length) {
+    host.replaceChildren(el("p", "note", "該当する annotation がありません"));
+    return;
+  }
   const logs = areas.map(Math.log10);
-  const lo = Math.floor(Math.min(...logs) * 4) / 4, hi = Math.ceil(Math.max(...logs) * 4) / 4;
-  const step = 0.25, nb = Math.round((hi - lo) / step);
+  const lo = Math.floor(Math.min(...logs) * 4) / 4;
+  let hi = Math.ceil(Math.max(...logs) * 4) / 4;
+  const step = 0.25;
+  if (hi <= lo) hi = lo + step;
+  const nb = Math.round((hi - lo) / step);
   const bins = new Array(nb).fill(0);
   for (const v of logs) bins[Math.min(Math.floor((v - lo) / step), nb - 1)]++;
   const max = Math.max(...bins);
@@ -140,7 +150,10 @@ const sup = (n) => String(n).replace("-", "⁻").replace(/\d/g, (d) => "⁰¹²�
 
 /* ── 3. 体外領域の裾（点の帯。x=包含率、状態色は severity） ── */
 function chartOutside(host) {
-  const pts = rows.filter((r) => r[R.CONT] != null && r[R.CONT] < 1)
+  const subset = outSel.value
+    ? rows.filter((r) => (V.ct[r[R.CT]] || "(ラベルなし)") === outSel.value)
+    : rows;
+  const pts = subset.filter((r) => r[R.CONT] != null && r[R.CONT] < 1)
     .map((r) => ({ c: r[R.CONT], out: r[R.OUT] || 0, uid: r[R.UID],
                    inst: V.inst[r[R.INST]], usr: V.usr[r[R.USR]], area: r[R.AREA],
                    file: r[R.FILE] }));
@@ -211,6 +224,30 @@ function chartOutside(host) {
   svg.append(leg);
   host.replaceChildren(svg);
 }
+
+/* ── S03 面積分布: 所見フィルタ ── */
+const ctSel = $("#f-area-ct");
+const ctCount = new Map();
+for (const r of rows) {
+  if (r[R.AREA] == null || r[R.AREA] <= 0) continue;
+  const label = V.ct[r[R.CT]] || "(ラベルなし)";
+  ctCount.set(label, (ctCount.get(label) || 0) + 1);
+}
+[...ctCount].sort((a, b) => b[1] - a[1])
+  .forEach(([label, n]) => ctSel.append(new Option(`${label} (${n})`, label)));
+ctSel.addEventListener("change", () => chartArea($("#chart-area")));
+
+/* ── S05 体外領域: 所見フィルタ ── */
+const outSel = $("#f-outside-ct");
+const outCount = new Map();
+for (const r of rows) {
+  if (r[R.CONT] == null || r[R.CONT] >= 1) continue;
+  const label = V.ct[r[R.CT]] || "(ラベルなし)";
+  outCount.set(label, (outCount.get(label) || 0) + 1);
+}
+[...outCount].sort((a, b) => b[1] - a[1])
+  .forEach(([label, n]) => outSel.append(new Option(`${label} (${n})`, label)));
+outSel.addEventListener("change", () => chartOutside($("#chart-outside")));
 
 function drawAll() {
   chartPending(document.getElementById("chart-pending"));
