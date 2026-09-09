@@ -865,10 +865,48 @@ function rTime(iso) {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
+const rSel = $("#fp-select");
+let rFpLoaded = false;
+
+// fingerprint の選択肢。構成（データセット本数）と最終更新を出す。
+// hash だけ見せても「古い版」と「別構成」の区別が付かない。
+async function rLoadFingerprints(current) {
+  try {
+    const res = await fetch("/api/fingerprints", { cache: "no-store" });
+    if (!res.ok) return;
+    const { options } = await res.json();
+    rSel.replaceChildren();
+    rSel.append(new Option("自動（設定に従う）", "auto"));
+    for (const o of options) {
+      const parts = [o.fingerprint];
+      if (o.n_sources != null) parts.push(`${o.n_sources}データセット`);
+      if (o.is_config) parts.push("＝いまの設定");
+      if (!o.artifacts["selection_decisions.json"]) parts.push("select 未実行");
+      else if (o.mtime) parts.push(rTime(o.mtime));
+      const rd = o.review_decisions;
+      if (rd && (rd.annotations || rd.images)) {
+        parts.push(`判定 ${rd.annotations}/${rd.images}`);
+      }
+      rSel.append(new Option(parts.join(" — "), o.fingerprint));
+    }
+    rSel.value = current || "auto";
+    rFpLoaded = true;
+  } catch {
+    // 一覧が取れなくても本体の表示は続ける。
+  }
+}
+
 function rRender(s) {
   const job = s.job;
   const running = job && !job.finished_at;
-  rHtml.disabled = rFull.disabled = running || !s.allow_refresh;
+  const w = s.writability || { can_rebuild_html: false, can_run_full: false };
+  // ★更新してよい状態かをボタンごとに見る。フル更新は scan→check→select で
+  // 足りないものを作るので、成果物が無くても押せる。HTML再構成は読むものが
+  // 揃っていないと「面積が空のHTML」で正常な成果物を潰すので押せない。
+  rHtml.disabled = running || !w.can_rebuild_html;
+  rFull.disabled = running || !w.can_run_full;
+  if (!rFpLoaded) rLoadFingerprints(s.pinned);
+  else rSel.value = s.pinned || "auto";
 
   if (running) {
     rNote.textContent = `${job.mode === "full" ? "フル更新" : "HTML再構成"}中 — ${job.step}`;
@@ -876,9 +914,9 @@ function rRender(s) {
     rNote.textContent = `更新が失敗した（${job.step}）。ログを確認する。`;
   } else {
     rNote.textContent = `最終生成 ${rTime(s.dashboard_mtime)}`
-      + (s.stale ? "　※成果物のほうが新しい。再読み込みで作り直される。" : "");
+      + (s.stale && w.can_rebuild_html
+        ? "　※成果物のほうが新しい。再読み込みで作り直される。" : "");
   }
-  if (!s.allow_refresh) rNote.textContent += "（閲覧専用で起動している）";
 
   // ログは実行中と失敗時だけ出す。成功したらリロードするので残しても見えない。
   const showLog = running || (job && job.ok === false);
@@ -888,24 +926,56 @@ function rRender(s) {
     rLog.scrollTop = rLog.scrollHeight;
   }
 
-  // fingerprint の食い違いは黙って隠さない。データセットを足すと出力先が変わり、
-  // 過去の目視判定（review_decisions.json）が引き継がれないため。
+  // 食い違いは黙って隠さない。**「古い版」ではなく「別構成」**であることと、
+  // 何が足りないか（scan / check / select）を具体的に出す。以前は
+  // 「select の成果物が無い」としか言わず、select だけ回して失敗していた。
   const warn = [];
+  const shown = s.served_n_sources != null ? `${s.served_n_sources}データセット` : "構成不明";
+  const mine = s.n_sources != null ? `${s.n_sources}データセット` : "構成不明";
+  if (s.served_reason === "pinned") {
+    warn.push(`fingerprint を ${s.served_fingerprint}（${shown}）に固定して表示している。`);
+  }
   if (s.served_reason === "newest" && s.config_fingerprint !== s.served_fingerprint) {
-    warn.push(`いまの設定は ${s.config_fingerprint} を指しているが、`
-      + `そこに select の成果物が無いので ${s.served_fingerprint} を表示している。`);
+    warn.push(`いまの設定（${mine} / ${s.config_fingerprint}）の成果物が無いので、`
+      + `${s.served_fingerprint}（${shown}）を表示している。`
+      + `古い版ではなく別構成。`);
   }
   if (s.served_reason === "missing") {
-    warn.push("成果物がまだ無い。check → select を実行する。");
+    warn.push(`いまの設定（${mine} / ${s.config_fingerprint}）の成果物がまだ無い。`);
+  }
+  if ((s.missing_artifacts || []).length) {
+    warn.push(`不足: ${s.missing_artifacts.join(" / ")}`);
+  }
+  for (const b of w.blockers || []) warn.push(b);
+  if (!w.can_rebuild_html && w.can_run_full) {
+    warn.push("フル更新（scan → check → select → report → gui）で作れる。");
+  }
+  if (!w.can_rebuild_html && !w.can_run_full && s.allow_refresh) {
+    warn.push("更新するには表示を『自動（設定に従う）』に戻す。");
   }
   const rd = s.review_decisions;
   if (rd && rd.annotations === 0 && rd.images === 0) {
     warn.push("この出力先には人間の判定が0件。データセットを足した直後なら、"
-      + "旧 fingerprint の review_decisions.json を select --review-decisions で渡す。");
+      + "旧 fingerprint の review_decisions.json をコピーするか "
+      + "select --review-decisions で渡す。");
   }
   rWarn.hidden = !warn.length;
   rWarn.textContent = warn.join(" ");
 }
+
+rSel.addEventListener("change", async () => {
+  const fp = rSel.value;
+  try {
+    const res = await fetch(`/api/fingerprint?fp=${encodeURIComponent(fp)}`,
+      { method: "POST" });
+    if (!res.ok) { rNote.textContent = `選択できない（${res.status}）`; return; }
+  } catch (error) {
+    rNote.textContent = `選択できない（${error}）`;
+    return;
+  }
+  // 表示中の成果物が変わるので読み直す。
+  location.reload();
+});
 
 async function rPoll() {
   let s;
@@ -938,8 +1008,10 @@ async function rPoll() {
 
 async function rStart(mode) {
   if (mode === "full" && !window.confirm(
-      "フル更新は review export → select → report → gui を順に実行する。\n"
-      + "FiftyOne と mongod に触るので数分かかり、目視結果の取り込みに失敗することもある。\n"
+      "フル更新は scan → check → review export → select → report → gui を順に実行する。\n"
+      + "走査済みは飛ばすので通常は数分だが、**新しいデータセット構成では scan に\n"
+      + "1時間以上かかることがある**（33,000枚のDICOMを実際に読む）。\n"
+      + "FiftyOne と mongod にも触るので、目視結果の取り込みに失敗することもある。\n"
       + "実行する？")) return;
   rHtml.disabled = rFull.disabled = true;
   try {

@@ -42,12 +42,31 @@ from ..config import Config
 
 logger = logging.getLogger(__name__)
 
-#: フル更新で回す段。目視結果の取り込みから採否・レポートまで一周する。
-FULL_STEPS: tuple[tuple[str, ...], ...] = (
-    ("review", "export"),
-    ("select",),
-    ("report",),
-    ("gui",),
+#: フル更新で回す段と、**成功とみなす exit code**。
+#:
+#: ``scan`` と ``check`` が要る。無いと fingerprint が変わった直後は
+#: ``select`` が「issues.json が無い」で必ず落ち、**ボタンでは絶対に解消
+#: できない**（実際にそうなっていた）。``scan`` は走査済みを飛ばすので
+#: 通常は1秒未満で終わり、新しい構成のときだけ時間がかかる。
+#:
+#: ★``check`` の 1 を許すのが必須。error severity があれば ``EXIT_ISSUES=1``
+#: を返す仕様で、実データには error が204件ある。1 を失敗扱いにすると
+#: 連鎖が毎回 check で止まる。``select`` の 1（部分的な issues）は逆に
+#: 止めなければならない。
+FULL_STEPS: tuple[tuple[tuple[str, ...], frozenset[int]], ...] = (
+    (("scan",), frozenset({0})),
+    (("check",), frozenset({0, 1})),
+    (("review", "export"), frozenset({0})),
+    (("select",), frozenset({0})),
+    (("report",), frozenset({0})),
+    (("gui",), frozenset({0})),
+)
+
+#: 再生成に要る成果物。1つでも欠ければ ``dashboard.html`` は作り直せない。
+REQUIRED_FOR_REBUILD = (
+    "issues.json",
+    "selection_decisions.json",
+    "image_decisions.json",
 )
 
 #: 配信ディレクトリの中で「これより dashboard.html が古ければ作り直す」対象。
@@ -81,6 +100,32 @@ Renderer = Callable[[Config, Path], Path]
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass(frozen=True)
+class Writability:
+    """更新してよいか。だめなら理由を持つ（そのままUIに出す）。
+
+    **fingerprint 一致だけでは足りない。** 一致していても計測が欠けていれば、
+    再生成は「面積も包含率も空のダッシュボード」を作って正常な成果物を
+    上書きする。別構成を混ぜるのと同じ静かな劣化になる。
+
+    2つに分けているのは前提が違うから。フル更新は ``scan``→``check``→``select``
+    で足りないものを自分で作るので、成果物が無くても走ってよい（ここを塞ぐと
+    新しい構成から復旧できなくなる）。HTML再構成は既にある成果物を読むだけなので、
+    揃っていて整合していることが前提。
+    """
+
+    can_rebuild_html: bool
+    can_run_full: bool
+    blockers: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "can_rebuild_html": self.can_rebuild_html,
+            "can_run_full": self.can_run_full,
+            "blockers": list(self.blockers),
+        }
 
 
 @dataclass
@@ -121,11 +166,14 @@ class DashboardServer:
         renderer: Renderer,
         overrides: Sequence[str] = (),
         allow_refresh: bool = True,
+        pinned: str | None = None,
     ) -> None:
         self.config = config
         self.renderer = renderer
         self.overrides = list(overrides)
         self.allow_refresh = allow_refresh
+        # 明示的に選ばれた fingerprint。プロセス内のメモリだけに持つ。
+        self._pinned = pinned or None
         self.log_path = config.output_dir / "dashboard_serve.log"
         self._job: Job | None = None
         self._job_lock = threading.Lock()
@@ -158,14 +206,28 @@ class DashboardServer:
         self._fingerprint_memo = (key, value)
         return value
 
+    def pinned(self) -> str | None:
+        return self._pinned
+
+    def pin(self, fingerprint: str | None) -> None:
+        """配信する fingerprint を明示する。``None`` で自動（config に従う）へ戻す。"""
+        self._pinned = fingerprint or None
+
     def target_dir(self) -> tuple[Path | None, str]:
         """配信するディレクトリと、そう選んだ理由を返す。
 
-        config の fingerprint が指す先を優先する。そこに ``select`` の成果物が
-        無ければ、``selection_decisions.json`` の mtime が最新のディレクトリへ
-        フォールバックする。ディレクトリ自体の mtime は、既存ファイルを上書き
-        するだけの ``select`` では更新されないことがあるので見ない。
+        1. pin されていればそこ。**フォールバックしない** —— 選んだものが
+           見えないなら選択の意味が無いので、無ければ 503 で理由を出す
+        2. config の fingerprint が指す先に ``select`` の成果物があればそこ
+        3. 無ければ ``selection_decisions.json`` の mtime が最新のところへ
+
+        ディレクトリ自体の mtime は、既存ファイルを上書きするだけの ``select``
+        では更新されないことがあるので見ない。
         """
+        if self._pinned:
+            target = self.config.validation_dir / self._pinned
+            return (target if target.exists() else None), "pinned"
+
         expected = self.config.validation_dir / self.fingerprint()
         if (expected / "selection_decisions.json").exists():
             return expected, "config"
@@ -180,6 +242,91 @@ class DashboardServer:
             candidates, key=lambda p: (p / "selection_decisions.json").stat().st_mtime
         )
         return newest, "newest"
+
+    # --------------------------------------------------------- 更新してよいか
+
+    def writability(self) -> Writability:
+        """いま更新してよいかを、理由つきで返す。"""
+        from .validation_meta import read_meta
+
+        out_dir, reason = self.target_dir()
+        config_fp = self.fingerprint()
+        blockers: list[str] = []
+
+        if not self.allow_refresh:
+            return Writability(
+                False, False, ("閲覧専用で起動している（--no-refresh）",)
+            )
+
+        if reason == "missing" or out_dir is None:
+            # まだ何も無い。データセットを足した直後がこの状態で、**ここを
+            # 塞ぐと復旧手段が無くなる**（フル更新が scan→check→select で
+            # 作る）。再生成は読むものが無いのでできない。
+            return Writability(
+                can_rebuild_html=False,
+                can_run_full=True,
+                blockers=(
+                    f"この設定（{config_fp}）の成果物がまだ無い。"
+                    "フル更新（scan → check → select）で作れる",
+                ),
+            )
+
+        # フル更新は config の fingerprint に書く。別構成を見ている状態で
+        # 押すと「押したのに表示が変わらない」になるので、揃っているときだけ。
+        served_fp = out_dir.name
+        if served_fp != config_fp:
+            blockers.append(
+                f"表示中の {served_fp} は現在の設定 {config_fp} と"
+                "別の構成。混ぜて再生成しないため読み取り専用"
+            )
+            return Writability(False, False, tuple(blockers))
+        missing = [n for n in REQUIRED_FOR_REBUILD if not (out_dir / n).exists()]
+        if missing:
+            blockers.append(f"成果物が無い: {', '.join(missing)}")
+
+        meta = read_meta(out_dir)
+        if meta is not None and meta.fingerprint and meta.fingerprint != served_fp:
+            blockers.append(
+                f"成果物の meta が別の fingerprint（{meta.fingerprint}）を指している"
+            )
+
+        measurements = meta.measurements if meta else None
+        if measurements is not None:
+            if not measurements.usable:
+                blockers.append(
+                    f"計測キャッシュが足りない（{measurements.shortfall()}）"
+                )
+        elif self._scan_never_ran():
+            # meta.json が無い古い出力。**「問題なし」と解釈しない。**
+            # ただし対象ファイル数は元JSONを読まないと分からず、状態表示の
+            # たびに読むのは重い。「1件も走査していない」ことだけは安く確実に
+            # 言えるので、そこだけを見る（部分走査は meta.json を持つ新しい
+            # 出力で判定できる）。
+            blockers.append("計測キャッシュが1件も無い（scan していない）")
+
+        return Writability(
+            can_rebuild_html=not blockers,
+            can_run_full=True,  # 足りないものは連鎖が作る
+            blockers=tuple(blockers),
+        )
+
+    def _cache_files_path(self) -> Path:
+        """この config の計測キャッシュの files.jsonl。
+
+        ``cache_for(config)`` を使わずに ``self.fingerprint()`` から組むのは、
+        fingerprint の算出をこのクラスの1箇所に寄せるため（メモ化も効く）。
+        """
+        from ..core.cache import FILES_JSONL
+
+        return self.config.cache_dir / self.fingerprint() / FILES_JSONL
+
+    def _scan_never_ran(self) -> bool:
+        """この config の計測キャッシュが空か。判定できなければ偽（止めない）。"""
+        try:
+            return not self._cache_files_path().exists()
+        except Exception as error:  # 判定できないなら既存運用を壊さない
+            logger.debug("計測キャッシュを読めない: %s", error)
+            return False
 
     def is_stale(self, out_dir: Path) -> bool:
         """``dashboard.html`` が成果物より古いか。"""
@@ -197,7 +344,20 @@ class DashboardServer:
 
         これがあるので、データセット追加＋パイプライン再実行のあとは
         **ブラウザを再読み込みするだけ**で最新になる。
+
+        ★**再生成してよい状態のときだけ**。以前はここが無条件で、
+        別構成を配信中でも ``renderer(self.config, out_dir)`` を呼んでいた。
+        その結果「12本構成の採否に6本構成の母集団と（存在しない）計測値を
+        貼った混成HTML」を作り、正常な成果物を上書きしていた。
+        fingerprint が一致していても計測が欠けていれば、面積・包含率が空の
+        HTMLで正常な成果物を潰す。どちらも何もしない。
         """
+        writable = self.writability()
+        if not writable.can_rebuild_html:
+            logger.debug(
+                "再生成しない（%s）: %s", out_dir, "; ".join(writable.blockers)
+            )
+            return
         with self._render_lock:
             if not self.is_stale(out_dir):
                 return
@@ -247,10 +407,13 @@ class DashboardServer:
         job.ok = True
 
     def _run_full(self, job: Job) -> None:
-        """``review export`` → ``select`` → ``report`` → ``gui`` を順に回す。
+        """``scan`` から ``gui`` まで順に回す。
 
         サブプロセスで走らせるのは、``review export`` が fiftyone を import する
         から。このモジュールが直接呼ぶと層の約束が壊れる。
+
+        **段ごとに許容 exit code が違う**（``FULL_STEPS`` 参照）。``check`` は
+        error を見つけると 1 を返すのが正常なので、そこで止めてはいけない。
         """
         set_args: list[str] = []
         for override in self.overrides:
@@ -258,18 +421,27 @@ class DashboardServer:
 
         with self.log_path.open("a", encoding="utf-8") as log:
             log.write(f"\n===== フル更新 {job.started_at} =====\n")
-            for step in FULL_STEPS:
+            for step, accepted in FULL_STEPS:
+                argv = list(step) + self._step_options(step)
                 name = " ".join(step)
                 job.step = name
-                job.say(f"$ segmentation-validation {' '.join(set_args + list(step))}")
+                job.say(f"$ segmentation-validation {' '.join(set_args + argv)}")
                 log.write(f"--- {name} ---\n")
                 log.flush()
-                code = self._run_step(step, set_args, job, log)
-                if code != 0:
+                code = self._run_step(argv, set_args, job, log)
+                if code not in accepted:
                     job.say(f"`{name}` が exit {code} で終わった。ここで中断する。")
                     job.ok = False
                     return
+                if code:
+                    job.say(f"（`{name}` は exit {code}。想定内なので続ける）")
         job.ok = True
+
+    def _step_options(self, step: tuple[str, ...]) -> list[str]:
+        """段ごとの追加引数。設定から取れるものはここで足す。"""
+        if step == ("scan",):
+            return ["--jobs", str(self.config.gui.scan_jobs)]
+        return []
 
     def _run_step(
         self, step: Sequence[str], set_args: Sequence[str], job: Job, log: Any
@@ -319,8 +491,107 @@ class DashboardServer:
             "review_decisions": _review_counts(out_dir),
             "allow_refresh": self.allow_refresh,
             "poll_interval_sec": self.config.gui.poll_interval_sec,
+            "pinned": self._pinned,
+            "n_sources": len(self.config.dataset_sources()),
+            "served_n_sources": _n_sources(out_dir),
+            "missing_artifacts": self._missing_artifacts(),
+            "writability": self.writability().as_dict(),
             "job": job.as_dict() if job else None,
         }
+
+    def _missing_artifacts(self) -> list[str]:
+        """いまの設定で作られていない成果物。UIに「何が足りないか」を出すため。
+
+        以前は「select の成果物が無い」としか言わなかったので、``select`` だけが
+        足りないように読めた。実際は ``scan`` と ``check`` も要る。
+        """
+        out_dir = self.config.validation_dir / self.fingerprint()
+        missing: list[str] = []
+        if self._scan_never_ran():
+            missing.append("走査キャッシュ（scan）")
+        for name, made_by in (
+            ("issues.json", "check"),
+            ("selection_decisions.json", "select"),
+            ("image_decisions.json", "select"),
+            ("dashboard.html", "gui"),
+        ):
+            if not (out_dir / name).exists():
+                missing.append(f"{name}（{made_by}）")
+        return missing
+
+    def fingerprint_options(self) -> list[dict[str, Any]]:
+        """選べる fingerprint の一覧。
+
+        構成名は ``output/cache/<fp>/manifest.json``（数KB）と ``meta.json``
+        から読む。``issues.json`` は実データで60MBあるので一覧のために開けない。
+        """
+        from .validation_meta import read_meta
+
+        config_fp = self.fingerprint()
+        options: list[dict[str, Any]] = []
+        root = self.config.validation_dir
+        if not root.exists():
+            return options
+        for out_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            meta = read_meta(out_dir)
+            sources = (
+                list(meta.sources)
+                if meta and meta.sources
+                else _cache_sources(self.config, out_dir.name)
+            )
+            selection = out_dir / "selection_decisions.json"
+            options.append(
+                {
+                    "fingerprint": out_dir.name,
+                    "is_config": out_dir.name == config_fp,
+                    "n_sources": len(sources) if sources is not None else None,
+                    "sources": sources,
+                    "artifacts": {
+                        name: (out_dir / name).exists()
+                        for name in ("issues.json", "dashboard.html")
+                    }
+                    | {"selection_decisions.json": selection.exists()},
+                    "mtime": (
+                        datetime.fromtimestamp(
+                            selection.stat().st_mtime, timezone.utc
+                        ).isoformat(timespec="seconds")
+                        if selection.exists()
+                        else None
+                    ),
+                    "review_decisions": _review_counts(out_dir),
+                }
+            )
+        # 選べるもの（select 済み）を先に、その中で新しい順。
+        options.sort(
+            key=lambda o: (
+                not o["artifacts"]["selection_decisions.json"],
+                o["mtime"] or "",
+            ),
+            reverse=False,
+        )
+        return options
+
+
+def _cache_sources(config: Config, fingerprint: str) -> list[str] | None:
+    """走査キャッシュの manifest から対象JSON名を読む。無ければ ``None``。"""
+    path = config.cache_dir / fingerprint / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return [str(s.get("name") or "") for s in (data.get("sources") or [])]
+
+
+def _n_sources(out_dir: Path | None) -> int | None:
+    """配信中の成果物が何本のデータセットで作られたか。"""
+    if out_dir is None:
+        return None
+    from .validation_meta import read_meta
+
+    meta = read_meta(out_dir)
+    return meta.n_sources if meta and meta.sources else None
 
 
 def _review_counts(out_dir: Path | None) -> dict[str, int] | None:
@@ -368,16 +639,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/status":
             self._send_json(200, self.dashboard.status())
             return
+        if path == "/api/fingerprints":
+            self._send_json(200, {"options": self.dashboard.fingerprint_options()})
+            return
 
         name = path.lstrip("/")
         if name not in SERVABLE:
             self._send_text(404, f"配信していない: {name}")
             return
 
-        out_dir, _ = self.dashboard.target_dir()
+        out_dir, reason = self.dashboard.target_dir()
         if out_dir is None:
+            if reason == "pinned":
+                # pin 先が無いなら**黙って別のものを出さない**。選んだものが
+                # 見えていないことに気づけるようにする。
+                self._send_text(
+                    503,
+                    f"選ばれた fingerprint {self.dashboard.pinned()} の"
+                    "ディレクトリが無い。選択を『自動』に戻すか、別のものを選ぶ。",
+                )
+                return
             self._send_text(
-                503, "配信できる成果物がまだ無い。check / select を実行してから開く。"
+                503, "配信できる成果物がまだ無い。scan → check → select を実行する。"
             )
             return
 
@@ -399,6 +682,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802  http.server の規約
         path, _, query = self.path.partition("?")
+        params = urllib.parse.parse_qs(query)
+
+        if path == "/api/fingerprint":
+            requested = params.get("fp", ["auto"])[0]
+            if requested in ("", "auto"):
+                self.dashboard.pin(None)
+                self._send_json(200, {"pinned": None})
+                return
+            known = {o["fingerprint"] for o in self.dashboard.fingerprint_options()}
+            if requested not in known:
+                self._send_text(404, f"知らない fingerprint: {requested}")
+                return
+            self.dashboard.pin(requested)
+            self._send_json(200, {"pinned": requested})
+            return
+
         if path != "/api/refresh":
             self._send_text(404, f"不明なエンドポイント: {path}")
             return
@@ -406,10 +705,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self._send_text(403, "このサーバーは閲覧専用で起動している（--no-refresh）")
             return
 
-        mode = urllib.parse.parse_qs(query).get("mode", ["html"])[0]
+        mode = params.get("mode", ["html"])[0]
         if mode not in ("html", "full"):
             self._send_text(400, f"mode は html か full: {mode!r}")
             return
+
+        # ★更新してよい状態かを先に見る。別構成を見ている状態で走らせると、
+        # 混成HTMLを作るか（html）、表示と関係ない出力先に書くか（full）になる。
+        writable = self.dashboard.writability()
+        allowed = writable.can_rebuild_html if mode == "html" else writable.can_run_full
+        if not allowed:
+            self._send_json(
+                409,
+                {
+                    "error": "いまは更新できない",
+                    "blockers": list(writable.blockers),
+                },
+            )
+            return
+
         if not self.dashboard.start_job(mode):
             self._send_json(409, {"error": "更新がすでに走っている"})
             return
@@ -485,6 +799,7 @@ def serve_forever(
     host: str = "127.0.0.1",
     port: int = 8899,
     allow_refresh: bool = True,
+    pinned: str | None = None,
 ) -> bool:
     """常駐サーバーを起動する。停止まで戻らない。
 
@@ -492,7 +807,11 @@ def serve_forever(
     このモジュールが cli を import すると循環するため）。
     """
     dashboard = DashboardServer(
-        config, renderer, overrides=overrides, allow_refresh=allow_refresh
+        config,
+        renderer,
+        overrides=overrides,
+        allow_refresh=allow_refresh,
+        pinned=pinned,
     )
     try:
         httpd = _Server((host, port), _make_handler(dashboard))

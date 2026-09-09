@@ -277,7 +277,12 @@ tr.detail > td { background: var(--surface-2); padding: 0; }
 /* ── 更新パネル。常駐サーバー（serve）経由のときだけ出る ── */
 .refresh { display: flex; flex-direction: column; gap: 7px; align-items: flex-end;
   max-width: 420px; }
-.refresh-row { display: flex; gap: 7px; }
+.refresh-row { display: flex; gap: 7px; align-items: center; }
+.refresh-row label { font: 500 11px var(--f-display); letter-spacing: .06em;
+  text-transform: uppercase; color: var(--ink-3); }
+.refresh select { font: 400 11.5px var(--f-body); color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule-strong);
+  padding: 4px 6px; max-width: 320px; }
 .refresh button { font: 500 12px var(--f-body); color: var(--ink); background: var(--surface);
   border: 1px solid var(--rule-strong); padding: 6px 12px; cursor: pointer; }
 .refresh button:hover:not(:disabled) { background: var(--surface-2); }

@@ -190,9 +190,25 @@ nohup uv run segmentation-validation \
   --set 'datasets.exclude=["01331","PTE_CX_MT_PI3"]' \
   serve > output/dashboard_serve.log 2>&1 &
 
-# 止めるとき
-pkill -f 'segmentation-validation.*serve'
+# 止めるとき: ポートを掴んでいるプロセスだけを落とす
+ss -ltnp 'sport = :8899'      # PID を確認してから
+kill <PID>
 ```
+
+> **`pkill -f 'segmentation-validation.*serve'` は使わないこと。** プロジェクトの
+> パスに `segmentation-validation` が含まれ、`server` という語も `.*serve` に
+> 引っかかるため、実機では **`ruff server` と FiftyOne App のサービス（5151）まで
+> 巻き込んで5プロセスにマッチする**。目視中に App が落ちる。
+> ポート番号は `config.gui.port`（既定 8899）。`--port` を変えているならそこを読み替える。
+
+一息で落とすなら:
+
+```bash
+kill "$(ss -ltnp 'sport = :8899' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
+```
+
+`uv run` の親プロセスは子が終われば一緒に終わるので、ポートを掴んでいる子だけを
+落とせばよい。
 
 手元PCの新しいターミナルで（または`~/.ssh/config`に`LocalForward`を書いておく）:
 
@@ -210,8 +226,15 @@ ssh -L 8899:localhost:8899 <本サーバー>
   出力先ディレクトリも変わる。`http.server`は起動時のディレクトリに張り付くので、
   古い成果物を配信し続ける。
 - **ページから更新を叩ける。** 右上の「HTMLを再構成」（数秒）と「フル更新」
-  （`review export`→`select`→`report`→`gui`、数分）。目視のあと
+  （`scan`→`check`→`review export`→`select`→`report`→`gui`）。目視のあと
   `select`を自分で回した場合は、ページを再読み込みするだけで作り直される。
+  `scan`と`check`が入っているので、**データセット構成を変えた直後でも
+  ボタンだけで一周できる**（ただし新しい構成の`scan`は1時間以上かかりうる）。
+- **表示する fingerprint を選べる。** 更新パネルの「表示」に、
+  データセット本数・最終更新・目視判定の件数つきで一覧が出る。
+  **現在の設定と別のものを選ぶと読み取り専用になり、更新ボタンは押せない**
+  （別構成の成果物を現在の設定で再生成すると混成HTMLになり、正常な成果物を
+  上書きしてしまうため）。更新したいときは「自動（設定に従う）」に戻す。
 
 ノートブックから開く場合は
 [notebooks/pipeline.ipynb](../notebooks/pipeline.ipynb) の3.5節に、
@@ -287,7 +310,66 @@ for combo, n in combo_counts.most_common():
 [2026-09実例](#2026-09-実例-pteptrの二重エクスポート) を参考に、
 影響範囲（患者数・annotation数）を添えて報告する。
 
-### 5.3 未アノテーション画像が異常に多いとき
+### 5.3 fingerprint が変わったとき（データセットを足した・除外を変えた）
+
+fingerprint は**対象JSONの `size` / `mtime_ns` / `sha256`** から決まる。つまり
+`datasets.exclude` を変えたときだけでなく、**共有ディレクトリの symlink が
+張り替わっただけでも変わる**。変わると出力先ディレクトリが丸ごと新しくなり、
+走査キャッシュも issues.json も目視結果も**そこには何も無い**。
+
+まず自分がどの構成を見ているか確かめる。
+
+```bash
+EX='datasets.exclude=["01331","PTE_CX_MT_PI3"]'   # 使っている絞り込み
+segmentation-validation --set "$EX" list-sources   # 対象JSON
+segmentation-validation --set "$EX" show-config    # 解決後の設定
+```
+
+**`--set` は全コマンドで同一にすること。** 1つ違うと fingerprint が変わり、
+別のディレクトリに書かれる。「select したのに表示が変わらない」の原因はほぼこれ。
+
+#### 必要なコマンドの列
+
+```bash
+segmentation-validation --set "$EX" scan --jobs 8   # ★新しい構成では1時間以上かかる
+segmentation-validation --set "$EX" check           # --only は付けない
+segmentation-validation --set "$EX" review build    # ★先に下記の引き継ぎを済ませる
+segmentation-validation --set "$EX" review launch   # 目視
+segmentation-validation --set "$EX" review export
+segmentation-validation --set "$EX" select
+segmentation-validation --set "$EX" report
+segmentation-validation --set "$EX" gui
+```
+
+`scan` を飛ばすと `check` は WARNING 1行で完走してしまうが、**画素を要する
+14チェックが「検出なし」になる**（画素を要らないのは M06/M07/S02 だけ）。
+そのままでは `select` が止まる（`計測キャッシュが足りない`）。承知のうえで
+進めるなら `select --allow-unmeasured` だが、**壊れたマスクが keep で通る**。
+
+#### 過去の目視結果を引き継ぐ
+
+**旧 fingerprint の `review_decisions.json` を新しい方へコピーするのが一番事故が
+少ない。**
+
+```bash
+NEW=output/validation/<新fp>/review
+OLD=output/validation/<旧fp>/review
+mkdir -p "$NEW" && cp "$OLD/review_decisions.json" "$NEW/"
+```
+
+コピーしておけば以降の `review export` はそれとマージするので育っていく。
+
+`select --review-decisions <旧fpのパス>` でも読めるが、**新しい方の
+`review_decisions.json` は更新されない**ので、次に素の `select`（やダッシュボードの
+フル更新）を回すと人間の判定が消えて pending に戻る。毎回付け続ける必要がある。
+
+> **`review build` を先に走らせないこと。** dataset を `overwrite=True` で作り直す。
+> 未 export の判定を守るゲートは `review_manifest.json` を基準線にしているので、
+> fingerprint が変わった直後は基準線が無い。いまは DB を直接見て
+> `reviewer` の入った判定があれば止めるようにしてあるが、`reviewer` 未入力の
+> 判定は取りこぼす。**先に `review export`**（または上のコピー）を済ませる。
+
+### 5.4 未アノテーション画像が異常に多いとき
 
 `image_class`（annotated / negative_case / unannotated_view / unannotated_orphan）を
 データセット単位で集計すると、性質の違うデータセットが混ざっていないか分かる

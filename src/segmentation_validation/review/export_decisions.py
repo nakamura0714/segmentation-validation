@@ -162,6 +162,24 @@ def unexported_human_decisions(
     return [row for row in rows if (row["kind"], row["key"]) not in exported]
 
 
+def human_decisions_in_db(config: Config) -> list[dict[str, Any]]:
+    """DB に入っている人間の判定を返す。**manifest 無しでも使える。**
+
+    ``unexported_human_decisions`` は manifest（DB を作ったときの基準線）を
+    前提にしているが、fingerprint が変わると manifest が見つからない。
+    そのとき「守るものが無い」と解釈すると、``review build`` が前の構成の
+    判定を消してしまう。
+
+    基準線が無いので「機械の判定から変わったか」は判定できない。
+    ``manifest=None`` のとき :func:`_is_human` は ``reviewer`` が入っている行だけ
+    を通すので、そのまま「DB にある人間の判定」になる —— 取りこぼしはあるが、
+    **あるものを「無い」と言わない**方向に倒す。
+
+    dataset が無ければ :class:`RuntimeError`（``collect_decisions`` と同じ）。
+    """
+    return collect_decisions(config, manifest=None)
+
+
 def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> None:
     """``rows``（今回スキャンできた人間の判定）を既存ファイルとマージして書く。
 

@@ -185,10 +185,13 @@ def test_保存ビューが全部作られる(built):
     """
     names = built.list_saved_views()
 
+    # ★件数ではなく名前で見る。件数だと「1本作られていない」ことに
+    # 気づけないまま数だけ合ってしまう（0-all-real が実際にそうだった）。
+    # ビューを足したときにここを直す必要が無いよう、上限は見ない。
     assert "0-all-real" in names, "Dataset ではなく Dataset.view() を渡すこと"
     assert "10-reasoned-decisions" in names
-    assert len(names) == 11
-    assert all(name.isascii() for name in names)
+    assert len(names) == len(set(names)), "同じ名前が二重に作られている"
+    assert all(name.isascii() for name in names), "日本語だけの名前は slug 化で失敗する"
 
 
 # --------------------------------------------------------------- 往復

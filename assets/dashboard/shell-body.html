@@ -14,6 +14,10 @@
            file:// で開いたときは /api/status が取れないので隠したままにする。 -->
       <div class="refresh" id="refresh" hidden>
         <div class="refresh-row">
+          <label for="fp-select">表示</label>
+          <select id="fp-select" title="表示する fingerprint を選ぶ"></select>
+        </div>
+        <div class="refresh-row">
           <button id="refresh-html">HTMLを再構成</button>
           <button id="refresh-full">フル更新</button>
         </div>

@@ -27,6 +27,7 @@ from .report.selection_output import (
     write_selection_csv,
     write_selection_json,
 )
+from .report.validation_meta import Measurements, write_meta
 from .selection.automatic import (
     build_automatic_decisions,
     build_broken_decisions,
@@ -96,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="check --only で作った部分的な issues.json でも採否を作る（既定は停止）",
     )
+    select.add_argument(
+        "--allow-unmeasured",
+        action="store_true",
+        help="計測キャッシュが足りないまま採否を作る（既定は停止）。"
+        "画素を要するチェック14種が「検出なし」になっていることを承知のうえで使う",
+    )
 
     sub.add_parser("report", help="summary.md を書き出す")
     sub.add_parser("gui", help="ブラウザで見るダッシュボードHTMLを書き出す")
@@ -111,6 +118,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-refresh",
         action="store_true",
         help="ブラウザからの更新を無効にする（閲覧専用にする）",
+    )
+    serve.add_argument(
+        "--fingerprint",
+        default=None,
+        metavar="v_xxxxxxxxxxxx",
+        help="配信する fingerprint を明示する（既定は設定から自動算出）。"
+        "設定と不一致なら混成を避けるため読み取り専用になる",
     )
 
     build = sub.add_parser(
@@ -327,8 +341,32 @@ def _check(config: Config, args: argparse.Namespace) -> int:
             len(checks),
             len(ALL_CHECKS),
         )
+    # ★計測の網羅性も同じ理由で刻む。scan していない／途中で止めた状態でも
+    # check は完走するので、後段が「実行したが計測が無かった」ことを
+    # 判定できないと、画素依存の14チェックが「検出なし」として採否に流れる。
+    measurements = Measurements(
+        n_files=len(context.groups),
+        n_measured=len(context.files),
+        scan_required=requires_scan(checks),
+    )
+    meta["measurements"] = measurements.as_dict()
+    if not measurements.usable:
+        logger.warning(
+            "計測キャッシュが足りない（%s）。画素を要するチェックが「検出なし」に "
+            "なっているので、select は既定で停止する",
+            measurements.shortfall(),
+        )
     write_issues_json(out_dir / "issues.json", issues, config, meta)
     write_issues_csv(out_dir / "issues.csv", issues, config)
+    write_meta(
+        out_dir,
+        fingerprint=_fingerprint(config),
+        sources=[Path(s).name for s in meta.get("sources", [])],
+        scale=meta.get("scale") or {},
+        checks_executed=executed,
+        checks_partial=bool(meta["checks_partial"]),
+        measurements=measurements,
+    )
 
     summary = summarize_issues(issues)
     logger.info("issues: %d 件 -> %s", summary["total"], out_dir)
@@ -337,17 +375,34 @@ def _check(config: Config, args: argparse.Namespace) -> int:
     return EXIT_ISSUES if summary["by_severity"].get("error") else EXIT_OK
 
 
-def _check_issues_complete(issues_path: Path, args: argparse.Namespace) -> bool:
-    """``issues.json`` が全チェックの結果か確かめる。
+def _check_issues_complete(
+    issues_path: Path,
+    args: argparse.Namespace,
+    context: CheckContext | None = None,
+) -> bool:
+    """``issues.json`` が採否を作れる完全性を持つか確かめる。
 
-    ``check --only M06,M07`` のように一部だけ回すと ``issues.json`` は上書きされて
-    部分結果になる。そのまま ``select`` すると**検出されなかったのか実行して
-    いないのかが区別できず**、pending が消えて採否が壊れる。
+    止める理由は2つあり、**別のリスクなので逃げ道も別**にしてある。
+
+    1. ``check --only M06,M07`` のように一部だけ回すと ``issues.json`` は
+       上書きされて部分結果になる。そのまま ``select`` すると**検出されなかった
+       のか実行していないのかが区別できず**、pending が消えて採否が壊れる。
+       → ``--allow-partial``
+    2. ``scan`` していない／途中で止めた状態でも ``check`` は完走する。画素を
+       要らないのは M06/M07/S02 だけで 17 のうち 14 は計測依存なので、計測が
+       無いまま採否を作ると M01〜M05・S03/S05・D01〜D04 が全部「検出なし」に
+       なり、**壊れたマスクが keep で通る**。部分実行より静かで危ない。
+       → ``--allow-unmeasured``
     """
     try:
         meta = json.loads(issues_path.read_text(encoding="utf-8")).get("meta", {})
     except (OSError, json.JSONDecodeError):
         return True  # 読めなければ後段の読み込みでエラーになる
+
+    return _gate_partial_checks(meta, args) and _gate_measurements(meta, args, context)
+
+
+def _gate_partial_checks(meta: dict[str, Any], args: argparse.Namespace) -> bool:
     if not meta.get("checks_partial"):
         return True
     executed = meta.get("checks_executed") or []
@@ -367,6 +422,53 @@ def _check_issues_complete(issues_path: Path, args: argparse.Namespace) -> bool:
     return False
 
 
+def _gate_measurements(
+    meta: dict[str, Any],
+    args: argparse.Namespace,
+    context: CheckContext | None,
+) -> bool:
+    """計測が欠けた ``issues.json`` から採否を作らせない。"""
+    measurements = Measurements.from_dict(meta.get("measurements"))
+    inferred = False
+    if measurements is None:
+        # この形式より前に作られた issues.json。**「問題なし」と解釈してはいけない**
+        # ので、その場の計測キャッシュから推定する（推定であることは明示する）。
+        if context is None:
+            return True
+        measurements = Measurements(
+            n_files=len(context.groups),
+            n_measured=len(context.files),
+            scan_required=True,
+        )
+        inferred = True
+
+    if measurements.usable:
+        return True
+
+    if inferred:
+        logger.warning(
+            "issues.json に計測の記録が無い（古い版）。いまの計測キャッシュから "
+            "推定した: %s",
+            measurements.shortfall(),
+        )
+    if getattr(args, "allow_unmeasured", False):
+        logger.warning(
+            "--allow-unmeasured: 計測が足りない（%s）まま採否を作る。"
+            "画素を要するチェックは「検出なし」になっている",
+            measurements.shortfall(),
+        )
+        return True
+    logger.error(
+        "計測キャッシュが足りない（%s）。画素を要するチェックが「検出なし」に "
+        "なっているので、この issues.json から採否は作れない",
+        measurements.shortfall(),
+    )
+    logger.error("  先に: `segmentation-validation <同じ --set> scan --jobs 8`")
+    logger.error("  そのうえで: `check`")
+    logger.error("承知の上なら `select --allow-unmeasured`")
+    return False
+
+
 def _select(config: Config, args: argparse.Namespace) -> int:
     context = _load_context(config)
     if context is None:
@@ -378,7 +480,7 @@ def _select(config: Config, args: argparse.Namespace) -> int:
         logger.error("issues.json が無い。先に check を実行する: %s", issues_path)
         return EXIT_FAILURE
 
-    if not _check_issues_complete(issues_path, args):
+    if not _check_issues_complete(issues_path, args, context):
         return EXIT_ISSUES
 
     issues = _read_issues(issues_path)
@@ -457,6 +559,14 @@ def _select(config: Config, args: argparse.Namespace) -> int:
     write_selection_csv(out_dir / "selection_decisions.csv", decisions)
     write_image_json(out_dir / "image_decisions.json", image_decisions, meta)
     write_image_csv(out_dir / "image_decisions.csv", image_decisions)
+    # check が刻んだ checks_executed / measurements は引き継がれる（write_meta が
+    # 既存を読んで重ねる）。ここでは規模と対象JSONを最新にする。
+    write_meta(
+        out_dir,
+        fingerprint=_fingerprint(config),
+        sources=[Path(s).name for s in meta.get("sources", [])],
+        scale=meta.get("scale") or {},
+    )
 
     summary = summarize_decisions(decisions)
     c = summary["cases"]
@@ -599,6 +709,7 @@ def _serve(config: Config, args: argparse.Namespace) -> int:
         host=args.host or config.gui.host,
         port=args.port or config.gui.port,
         allow_refresh=config.gui.allow_refresh and not args.no_refresh,
+        pinned=args.fingerprint,
     )
     return EXIT_OK if started else EXIT_FAILURE
 
@@ -752,7 +863,15 @@ def _check_unexported(config: Config, args: argparse.Namespace) -> bool:
     review_dir = _review_dir(config)
     manifest_path = review_dir / "review_manifest.json"
     if not manifest_path.exists():
-        return True  # 初回。守るものが無い
+        # ★「初回だから守るものは無い」と決めつけてはいけない。
+        # manifest が無い理由は2つあり、後者では DB に前の構成の判定が残る。
+        #   (a) 本当に初回
+        #   (b) fingerprint が変わった（データセットを足した／symlink が
+        #       張り替わった）。FiftyOne dataset 名は fingerprint 非依存の
+        #       単一名なので、DB の中身は前の構成のまま
+        # (b) で素通りすると overwrite=True が目視の成果を消す。DB を直接見て
+        # 人間の判定（reviewer が入っているもの）があれば止める。
+        return _check_unexported_without_manifest(config, args)
     try:
         from .review.export_decisions import unexported_human_decisions
     except ImportError:
@@ -783,6 +902,51 @@ def _check_unexported(config: Config, args: argparse.Namespace) -> bool:
         logger.error("  ... 他 %d 件", len(lost) - 10)
     logger.error("先に `segmentation-validation review export` を実行する")
     logger.error("捨ててよいなら `review build --discard-unexported`")
+    return False
+
+
+def _check_unexported_without_manifest(
+    config: Config, args: argparse.Namespace
+) -> bool:
+    """manifest が無いときに、DB の人間の判定だけを見てゲートする。
+
+    基準線（manifest）が無いので「機械の判定から変わったか」は判定できない。
+    ``reviewer`` が入っているものだけを人間の判定として数える —— 取りこぼしは
+    あるが、**あるものを「無い」と言わない**方向に倒す。
+    """
+    try:
+        from .review.export_decisions import human_decisions_in_db
+    except ImportError:
+        return True  # fiftyone が無ければ dataset も無い
+
+    try:
+        found = human_decisions_in_db(config)
+    except RuntimeError:
+        return True  # dataset が無い。本当の初回
+
+    if not found:
+        return True
+
+    if args.discard_unexported:
+        logger.warning(
+            "--discard-unexported: export していない判定 %d 件を捨てて作り直す",
+            len(found),
+        )
+        return True
+
+    logger.error(
+        "FiftyOne dataset に人間の判定が %d 件あるが、この出力先には "
+        "review_manifest.json が無い（fingerprint が変わった直後がこの状態）。"
+        "このまま review build すると DB を作り直して判定を失う",
+        len(found),
+    )
+    logger.error("  先に: `segmentation-validation review export`")
+    logger.error(
+        "  fingerprint を変える前の判定を引き継ぐなら、旧 fingerprint の "
+        "review/review_decisions.json を %s へコピーする",
+        _review_dir(config),
+    )
+    logger.error("承知の上なら `review build --discard-unexported`")
     return False
 
 

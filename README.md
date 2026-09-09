@@ -333,6 +333,18 @@ nohup uv run segmentation-validation serve > output/dashboard_serve.log 2>&1 &
 `ssh -L 8899:localhost:8899 <本サーバー>` でトンネルを張って開く。
 **インターネットへ公開しないこと。**
 
+止めるときは**ポートを掴んでいるプロセスだけ**を落とす。
+
+```bash
+ss -ltnp 'sport = :8899'      # PID を確認してから
+kill <PID>
+```
+
+> **`pkill -f 'segmentation-validation.*serve'` は使わないこと。** プロジェクトの
+> パスに `segmentation-validation` が含まれ、`server` も `.*serve` に引っかかるため、
+> 実機では **`ruff server` と FiftyOne App のサービス（5151）まで巻き込む**。
+> コードを変えたあとは、この停止 → 起動で反映される（`uv run` は作業ツリーを実行する）。
+
 jupyter のセルからは起動しない。**カーネル内にサーバーを立てるとカーネル再起動で
 止められなくなり**（`Address already in use` のまま回復できない）、配信先が
 起動時点のディレクトリに固定されるので**データセットを足すと古い成果物を
@@ -345,7 +357,13 @@ jupyter のセルからは起動しない。**カーネル内にサーバーを�
 | ボタン | 中身 | 目安 |
 |---|---|---|
 | HTMLを再構成 | ディスク上の成果物から `dashboard.html` を作り直す | 数秒 |
-| フル更新 | `review export` → `select` → `report` → `gui` を順に実行 | 数分 |
+| フル更新 | `scan` → `check` → `review export` → `select` → `report` → `gui` | 数分 |
+
+**フル更新には `scan` と `check` が入っている。** 無いと、データセット構成を変えた
+直後は `select` が「issues.json が無い」で必ず落ち、ボタンでは解消できない。
+`scan` は走査済みを飛ばすので通常は1秒未満で終わるが、**新しい構成では
+33,000枚のDICOMを実際に読むため1時間以上かかることがある**
+（走査キャッシュは fingerprint 単位で分離されており、構成を変えると流用されない）。
 
 自分で `select` を回したあとは、**ページを再読み込みするだけ**でよい
 （成果物のほうが新しいことを検知して作り直す）。ログは `output/dashboard_serve.log`。
@@ -365,8 +383,27 @@ nohup uv run segmentation-validation \
 > **fingerprint が変わると目視判定は引き継がれない。** データセットを1本足すと
 > 出力先が別ディレクトリになり、`review/review_decisions.json` も新しい空の場所を
 > 指す。`serve` は状態表示に「設定が指す fingerprint」「配信中の fingerprint」
-> 「人間の判定の件数」を出すので、0件になっていれば気づける。旧 fingerprint の
-> 判定を使うには `select --review-decisions <旧fpのパス>` で明示的に渡す。
+> 「人間の判定の件数」を出すので、0件になっていれば気づける。
+> 引き継ぎ手順は [docs/review_procedure.md](docs/review_procedure.md) 5.3。
+
+#### 表示する fingerprint を選ぶ
+
+更新パネルの「表示」で fingerprint を選べる（`serve --fingerprint <fp>` でも
+起動時に固定できる）。一覧には**データセット本数・最終更新・目視判定の件数**が出る
+—— hash だけでは「古い版」と「別構成」の区別が付かないため。
+
+**現在の設定と別の fingerprint を選ぶと読み取り専用になる。** 更新ボタンは
+両方とも押せない。別構成の成果物を現在の設定で再生成すると、
+「12本構成の採否に6本構成の母集団と計測値を貼った混成HTML」ができて、
+しかも正常な成果物を上書きしてしまうため。更新したいときは「自動（設定に従う）」
+に戻す。
+
+更新ボタンが押せない理由は状態表示に出る。よくあるのは次の2つ。
+
+| 表示 | 意味 |
+|---|---|
+| 別の構成。混ぜて再生成しないため読み取り専用 | 表示中の fingerprint が設定と違う |
+| 計測キャッシュが1件も無い（scan していない） | 再生成すると面積・包含率が空のHTMLになる |
 
 ### 3.6 FiftyOne で目視する
 

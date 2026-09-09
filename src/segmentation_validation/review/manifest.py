@@ -107,7 +107,11 @@ def build_manifest(
     ``spot_check_file_uids`` は ``select_spot_check_groups`` で選ばれた画像の
     ``file_uid`` 集合（未アノテーション画像のデータセット別スポットチェック用）。
     """
-    by_uid = {d.geometry_uid: d for d in decisions}
+    # ``geometry_uid`` は複数データセットで再利用される実例がある
+    # （cross-dataset 重複。D05 参照）ので、bare geometry_uid をキーにすると
+    # 別データセットの決定/Issueが誤って割り当てられる。``annotation_uid``
+    # （``f"{dataset_id}::{geometry_uid}"``）で引く。
+    by_uid = {d.annotation_uid: d for d in decisions}
     by_file = {d.file_uid: d for d in image_decisions}
     spot_check_file_uids = spot_check_file_uids or frozenset()
 
@@ -115,7 +119,9 @@ def build_manifest(
     issues_by_file: dict[str, list[Issue]] = {}
     for issue in issues:
         if issue.geometry_uid is not None:
-            issues_by_uid.setdefault(issue.geometry_uid, []).append(issue)
+            issues_by_uid.setdefault(
+                f"{issue.dataset_id}::{issue.geometry_uid}", []
+            ).append(issue)
         else:
             issues_by_file.setdefault(issue.file_uid, []).append(issue)
 

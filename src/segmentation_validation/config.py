@@ -218,7 +218,9 @@ class DecisionPolicyConfig:
     #                       既定では目視に回さない —— DICOMも実在し陰性症例として
     #                       明示されているため。「所見の見落としが無いか」まで
     #                       確認したい場合はここに追加する
-    review_image_classes: list[str] = field(default_factory=lambda: ["unannotated_view"])
+    review_image_classes: list[str] = field(
+        default_factory=lambda: ["unannotated_view"]
+    )
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,8 @@ class GuiConfig:
     allow_refresh: bool = True
     # 更新ジョブ実行中にブラウザが状態を取りに来る間隔。
     poll_interval_sec: int = 2
+    # フル更新の scan 段の並列数。`scan --jobs` の既定値と揃えてある。
+    scan_jobs: int = 8
 
 
 @dataclass(frozen=True)
