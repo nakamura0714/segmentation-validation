@@ -17,6 +17,7 @@ from typing import Any, Sequence
 from ..checks.base import CheckStatus, Issue, Severity
 from ..config import Config
 from ..core.measure import ROLE_MASK, FileMeasurement, MaskMeasurement
+from ..review.review_schema import REASON_JA, split_reasons
 from ..selection.decisions import (
     CASE_STATUS_JA,
     CaseStatus,
@@ -203,6 +204,36 @@ def write_summary(
     for institution, count in top:
         add(f"| {institution} | {count} |")
     add("")
+
+    # 人間が入れた理由の内訳。これが空のままだと「なぜ除外したか」が残らない。
+    # 以前は機械の review_required が理由欄を埋めていて、人間の理由が
+    # 1件も記録されていなかった（実データ102件）。
+    human = [d for d in decisions if d.decision_source is DecisionSource.HUMAN]
+    human_reasons: dict[str, int] = {}
+    without_reason = 0
+    for decision in human:
+        found = [r for r in split_reasons(decision.reason) if r in REASON_JA]
+        if not found:
+            without_reason += 1
+        for reason in found:
+            human_reasons[reason] = human_reasons.get(reason, 0) + 1
+
+    add("## 目視の理由（人間が入れた分）")
+    add("")
+    if human_reasons:
+        width = max(len(r) for r in human_reasons)
+        for reason, n in sorted(human_reasons.items(), key=lambda kv: -kv[1]):
+            add(f"  {reason:<{width}}  {n:>4}   {REASON_JA[reason]}")
+        add("")
+    if not human:
+        add("目視の判定がまだ無い。")
+        add("")
+    elif without_reason:
+        add(
+            f"※ 人間の判定 {len(human)} 件のうち {without_reason} 件は理由が空。"
+            "App の review_reasons（チェックボックス）で選ぶと集計に乗る。"
+        )
+        add("")
 
     add("## アノテータ別（体外領域の warning 以上）")
     add("")

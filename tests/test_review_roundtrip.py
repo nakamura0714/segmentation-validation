@@ -177,9 +177,18 @@ def test_autoタグが貼られる(built):
 
 
 def test_保存ビューが全部作られる(built):
-    """★日本語だけの名前は slug 化で失敗する。ASCII 名であること。"""
-    # 6つの目視ビュー + 0-all-real（シード除外の入口）+ 7-flagged-for-report。
-    assert len(built.list_saved_views()) == 8
+    """★日本語だけの名前は slug 化で失敗する。ASCII 名であること。
+
+    ``0-all-real`` は長らく作られていなかった（``Dataset`` を ``save_view`` に
+    渡すと ``include_uuids`` で落ちる）。件数だけ見ていると気づけないので、
+    名前で確かめる。
+    """
+    names = built.list_saved_views()
+
+    assert "0-all-real" in names, "Dataset ではなく Dataset.view() を渡すこと"
+    assert "10-reasoned-decisions" in names
+    assert len(names) == 11
+    assert all(name.isascii() for name in names)
 
 
 # --------------------------------------------------------------- 往復
@@ -193,13 +202,14 @@ def input_judgments(dataset) -> None:
             if det["geometry_uid"] != "A":
                 continue
             det["review_status"] = Decision.EXCLUDE.value
-            det["review_reason"] = "outside_body"
+            # 候補から2つ選ぶ（重複であり、かつ古い方）。
+            det["review_reasons"] = ["invalid_duplicate", "older_duplicate"]
             det["reviewer"] = REVIEWER
             det["reviewed_at"] = "2026-09-04T09:00:00+00:00"
             sample["final"] = dets
         if sample["file_id"] == "F2":
             sample["review_status"] = Decision.EXCLUDE.value
-            sample["review_reason"] = "lateral_view"
+            sample["review_reasons"] = ["lateral_view"]
             sample["reviewer"] = REVIEWER
             sample["reviewed_at"] = "2026-09-04T09:00:00+00:00"
         sample.save()
@@ -248,14 +258,20 @@ def test_DBを消して再構築してimportすると判定が戻る(
         for det in (sample["final"].detections if sample["final"] else [])
     }
     assert by_uid["A"]["review_status"] == Decision.EXCLUDE.value
-    assert by_uid["A"]["review_reason"] == "outside_body"
+    assert by_uid["A"]["review_reasons"] == ["invalid_duplicate", "older_duplicate"]
+    # 候補で表せる理由は自由記述欄に残さない（二重に持つと食い違う）。
+    assert by_uid["A"]["review_reason"] == ""
+    # ★reason: タグも貼り直されている。貼り直さないと import のたびに消えていた。
+    assert "reason:invalid_duplicate" in by_uid["A"].tags
+    assert "reason:older_duplicate" in by_uid["A"].tags
     assert by_uid["A"]["reviewer"] == REVIEWER
     # 判定していない annotation は基準線のまま。
     assert by_uid["B"]["review_status"] == Decision.KEEP.value
 
     images = {s["file_id"]: s for s in restored}
     assert images["F2"]["review_status"] == Decision.EXCLUDE.value
-    assert images["F2"]["review_reason"] == "lateral_view"
+    assert images["F2"]["review_reasons"] == ["lateral_view"]
+    assert "reason:lateral_view" in images["F2"].tags
 
     # ★auto: タグは再構築で貼り直されている。
     assert "auto:s05_outside_body" in by_uid["A"].tags
@@ -480,3 +496,103 @@ def test_相手の日時がDetectionに載る(duplicate_pair, review_config):
     finally:
         if DATASET_NAME in fo.list_datasets():
             fo.delete_dataset(DATASET_NAME)
+
+
+# ------------------------------------------- 理由はチェックボックスで候補固定
+
+
+def test_理由はチェックボックスで候補固定(built):
+    """★これがこの機能の狙い。自由入力を許すと綴りミスが集計を割る。
+
+    ``list<str>`` + ``checkboxes`` のとき App は CheckboxList を描き、
+    自由入力の口が無い。``dropdown`` / ``text`` は AutocompleteView +
+    ``allow_user_input`` で自由入力が残ってしまう。
+    """
+    from segmentation_validation.review.review_schema import (
+        ALL_SUGGESTED_REASONS,
+        FIELD_REVIEW_REASONS,
+    )
+
+    by_name = {a["name"]: a for a in built.label_schemas["final"]["attributes"]}
+    spec = by_name[FIELD_REVIEW_REASONS]
+
+    assert spec["type"] == "list<str>"
+    assert spec["component"] == "checkboxes"
+    assert spec["values"] == list(ALL_SUGGESTED_REASONS)
+    assert not spec.get("read_only")
+
+
+def test_理由は判定欄の直下に並ぶ(built):
+    """判定を決めてから理由を選ぶ動きになるように。"""
+    names = [a["name"] for a in built.label_schemas["final"]["attributes"]]
+
+    assert names.index("review_reasons") == names.index("review_status") + 1
+
+
+def test_自由記述の理由欄も残る(built):
+    """候補で表せないことを書きたいときの逃げ道。"""
+    names = [a["name"] for a in built.label_schemas["final"]["attributes"]]
+
+    assert "review_reason" in names
+
+
+def test_機械の理由が理由欄に流し込まれていない(built):
+    """★目視前の annotation は機械の review_required を持っている。
+
+    それが理由欄に入っていると、人間が触らないまま「理由あり」として
+    export されてしまう（実データ102件でそうなっていた）。
+    """
+    for sample in _real_samples(built):
+        dets = sample["final"]
+        for det in dets.detections if dets else []:
+            assert det["review_reasons"] == [], det["geometry_uid"]
+            assert det["review_reason"] == "", det["geometry_uid"]
+        assert sample["review_reasons"] == []
+        assert sample["review_reason"] == ""
+
+
+def test_理由フィールドはlist_strとして宣言される(built):
+    """★これが崩れると Edit パネルから理由欄が消える。
+
+    ``add_samples(dynamic=True)`` は最初に見た値で型を決めて広げないので、
+    理由を持たない annotation の ``[]`` が先に来ると要素の型が決まらない
+    ``ListField`` になり、``list<str>`` と見なされない。
+    ``_declare_reason_field()`` が順序に依存せず型を固定している。
+    """
+    import fiftyone.core.fields as fof
+
+    from segmentation_validation.review.review_schema import FIELD_REVIEW_REASONS
+
+    field = built.get_field_schema(flat=True)[
+        f"final.detections.{FIELD_REVIEW_REASONS}"
+    ]
+
+    assert isinstance(field, fof.ListField)
+    assert isinstance(field.field, fof.StringField), (
+        "要素の型が決まっていないと list<str> として扱われない"
+    )
+
+
+def test_理由が区切りつきでexportされる(built, review_config, synthetic):
+    """``selection_decisions.csv`` の読み手が detected_checks と同じ扱いをできる形。"""
+    from segmentation_validation.review.export_decisions import collect_decisions
+
+    input_judgments(built)
+    collected = collect_decisions(review_config, synthetic)
+    rows = {(r["kind"], r["key"]): r for r in collected}
+
+    assert rows[("annotation", "A")]["reason"] == "invalid_duplicate|older_duplicate"
+    image_key = synthetic["images"][1]["file_uid"]
+    assert rows[("image", image_key)]["reason"] == "lateral_view"
+
+
+def test_理由ビューが理由入りのannotationだけを集める(built):
+    input_judgments(built)
+    view = built.load_saved_view("10-reasoned-decisions")
+
+    uids = [
+        det["geometry_uid"]
+        for sample in view
+        for det in (sample["final"].detections if sample["final"] else [])
+    ]
+    assert uids == ["A"]

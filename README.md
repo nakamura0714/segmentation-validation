@@ -122,7 +122,9 @@ selection_decisions.csv : final_decision = keep         ← 開発データに�
 | `older_exact_duplicate` | 完全一致の重複のうち古い方（自動 exclude） | 101 |
 | `broken_mask` | 機械が確定的に「使えない」と判定（自動 exclude） | 0 |
 | `out_of_scope` | 検証対象ラベルの外（既定は全病変なので0） | 0 |
-| `visually_valid` / `invalid_annotation` 等 | 人が見て判断した（自由記述） | 0（目視前） |
+| `invalid_duplicate` / `older_duplicate` / `invalid_annotation` 等 | 人が見て判断した理由（`review_reasons` のチェックボックス。複数なら `\|` 区切り） | 0（未入力） |
+
+**機械の理由と人間の理由が同じ列を共有している。** 区別は併記される `decision_source`（`automatic` / `human` / `default`）で行う。`review_required` のような機械の値が人間の理由として入ることは無い（`review export` が落とす）。
 
 #### `cannot_determine` なのに `keep` なのはなぜか
 
@@ -453,7 +455,8 @@ ssh -L 5151:localhost:5151 pi6
 | 入力先 | フィールド | 値 |
 |---|---|---|
 | **annotation の良否** | Detection（Label）の `review_status` | `keep` / `exclude` / `uncertain` |
-| | `review_reason` | `visually_valid` / `invalid_annotation` など |
+| | `review_reasons` | **理由。チェックボックスから複数選ぶ**（`invalid_duplicate` = 重複、`older_duplicate` = 古い、`invalid_annotation` = 不適切 など12種） |
+| | `review_reason` | 自由記述。候補で表せないことだけ |
 | | `reviewer` | 自分のメールアドレス |
 | **画像自体を使うか** | Sample の `review_status` | `keep` / `exclude` |
 | | `review_reason` | `frontal_view` / `lateral_view` など |
@@ -466,6 +469,13 @@ ssh -L 5151:localhost:5151 pi6
 
 > `reviewer` は空でも判定は有効だが、後から追えなくなる。埋めることを推奨
 > （空のままだと `review export` が警告を出して `unknown` で記録する）。
+
+> **理由は `review_reasons`（チェックボックス）で入れる。** 自由入力の口が無いので
+> 綴りミスが起きず、`summary.md` と `dashboard.html` の集計に乗る。
+> 以前は自由記述の `review_reason` に機械の `review_required` が初期値として
+> 入っており、それが「人間の理由」として書き出されていた（実測102件が全部それ）。
+> **過去分は上書き済みで復元できない**ので、必要なら App で付け直す。
+> 詳細は [docs/review_procedure.md](docs/review_procedure.md) 2.2。
 
 ### 3.8 判定を採否へ反映する
 

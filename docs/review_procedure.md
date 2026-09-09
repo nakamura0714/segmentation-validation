@@ -44,7 +44,7 @@ uv run segmentation-validation review launch    # http://localhost:5151 でApp�
 
 | ビュー | 内容 |
 |---|---|
-| `0-all-real` | 候補シード（後述）を除いた全件。目視対象以外も見たいときの入口 |
+| `0-all-real` | 全件。目視対象以外も見たいときの入口（候補シードも含む。後述） |
 | `1-pending-annotations` | 目視待ちのannotation |
 | `2-pending-images` | 目視待ちの画像（未アノテーションのビュー） |
 | `3-outside-body` | 体外領域（S05） |
@@ -52,6 +52,7 @@ uv run segmentation-validation review launch    # http://localhost:5151 でApp�
 | `5-contained-different-label` | 包含された重複・別ラベル（D04） |
 | `6-broken-bbox` | 座標が壊れているbbox |
 | `7-flagged-for-report` | 目視中に気になった（`flag:needs_report`タグを付けた）annotation/画像 |
+| `10-reasoned-decisions` | 理由（`review_reasons`）を入れたannotation。入れ忘れの洗い出しに使う |
 
 ### 2.2 判定の入力
 
@@ -60,11 +61,46 @@ annotationを選択 → 属性パネルで以下を入力する。
 | フィールド | 値 |
 |---|---|
 | `review_status` | `keep` / `exclude` / `uncertain` |
-| `review_reason` | 自由記述。候補に `visually_valid` / `invalid_annotation` / `outside_body` 等が出る |
+| `review_reasons` | **理由。チェックボックスから選ぶ（複数可）。下表参照** |
+| `review_reason` | 自由記述。候補で表せないことを書きたいときだけ使う |
 | `reviewer` | 自分のメールアドレス |
 | `review_comment` | 補足コメント（任意） |
 
 画像自体の採否（未アノテーションのビューが側面像かどうか）はSample側の同名フィールドに入力する。
+
+#### 理由（`review_reasons`）
+
+`review_status`のすぐ下に**チェックボックス**で並ぶ。**自由入力の口が無いので
+綴りミスが起きない**（`list<str>` + `checkboxes` のとき App は候補固定のUIを描く）。
+複数選べる。
+
+| 値 | 意味 | 側 |
+|---|---|---|
+| `invalid_duplicate` | 重複 | exclude |
+| `older_duplicate` | 古い（ペアの古い方） | exclude |
+| `invalid_annotation` | 不適切 | exclude |
+| `stray_component` | 飛び地 | exclude |
+| `outside_body` | 体外 | exclude |
+| `lateral_view` | 側面像 | exclude |
+| `wrong_label` | ラベル違い | exclude |
+| `visually_valid` | 目視で妥当 | keep |
+| `true_small_lesion` | 実際に小さい病変 | keep |
+| `valid_nested_annotation` | 入れ子の所見として正当 | keep |
+| `boundary_tolerance` | 境界の許容範囲 | keep |
+| `frontal_view` | 正面像 | keep |
+
+「重複」と「古い」は**別の事実**なので両方付けてよい（同じマスクが2枚あり、
+かつ自分が古い方 → 両方チェック）。片方だけだと「なぜこちらを消したか」が残らない。
+
+選んだ理由は`reason:`タグにも自動で写る（絞り込みと保存ビュー
+`10-reasoned-decisions`用）。**正本はフィールド側**で、タグは写し。
+`review_status`と`review:`タグの関係と同じ。
+
+> **`review_reason`（単数・自由記述）に機械の理由が残っていても無視される。**
+> 以前は目視待ちのannotationに機械の`review_required`が初期値として入っており、
+> それがそのまま「人間の理由」として書き出されていた（実データ102件が全部
+> `review_required`）。いまは機械の理由を人間の理由として書き出さない。
+> **過去102件の理由は上書き済みで復元できない**ので、必要なら付け直す。
 
 **`pending` と `uncertain` の違い**: `pending`は「まだ見ていない」、`uncertain`は
 「見たが自分では判断できない（Drに要相談等）」。判断できないものは`pending`のまま
@@ -93,6 +129,11 @@ annotationで明らかにおかしいものを偶然見つけた場合は、`fla
 まとめて拾えるので、`institution`/`patient_id`/`file_id`等の属性と一緒に
 データ管理担当へ報告する。
 
+**`reason:` と `flag:` は別の軸。** `reason:`は「なぜその採否にしたか」（`review_reasons`
+の写し）、`flag:`は「データ管理担当に報告したい」という印。前者は採否の記録として
+`selection_decisions.csv`まで残り、後者はApp上の目印でしかない（export経路が無いので
+`review build`で消える）。
+
 ### 2.5 候補シードについて
 
 `review_status`の`uncertain`や`review_reason`の推奨値は、目視前は実データに
@@ -100,9 +141,16 @@ annotationで明らかにおかしいものを偶然見つけた場合は、`fla
 （FiftyOne 1.21のAppは実データの値をその場で拾って候補にするだけで、
 `choices`のような宣言的な候補リストは一切見ない。実機検証済み）。
 これを解消するため、`review build`は候補値を実在させるためだけの捨てSample/Detection
-（`system:schema_seed`タグ付き、ラベル`__schema_seed__`）を11件追加している。
-保存ビュー・`review status`・`review export`はすべてこの捨て行を自動的に除外するので、
-目視作業では意識しなくてよい（保存ビュー`0-all-real`を使えば最初から見えない）。
+（`system:schema_seed`タグ付き、ラベル`__schema_seed__`）を12件追加している
+（件数は`ALL_SUGGESTED_REASONS`の数。理由を増やすと増える）。
+
+ただし**`review_reasons`のチェックボックスはこの仕組みに依存しない**。label schemaの
+`values`に候補を直接書き込んでいるので、実データに1件も無くても候補が出る
+（「宣言的な候補リストは見ない」のは`dataset.classes`/`StringField(choices=)`の話で、
+label schemaの`values`はAppが見る）。
+`review status`・`review export`・`10-reasoned-decisions`はこの捨て行を除外するので、
+件数が狂うことはない。ただし`0-all-real`は**あえて含めている**
+（除外すると、実データから値が消えた瞬間に選択式が自由入力に見えてしまう）。
 
 ## 3. 判定を採否へ反映する
 

@@ -884,6 +884,23 @@ def _review_status(config: Config, args: argparse.Namespace) -> int:
     logger.info("  画像の判定      : %s", summary["image_status"])
     auto = {k: v for k, v in summary["label_tags"].items() if k.startswith("auto:")}
     logger.info("  auto: タグ      : %s", auto)
+    # 理由の内訳。exclude したのに理由を入れていないものを見つけるために出す。
+    from .review.review_schema import REASON_JA, REASON_PREFIX
+
+    reasons = {
+        REASON_JA.get(k[len(REASON_PREFIX) :], k[len(REASON_PREFIX) :]): v
+        for k, v in sorted(summary["label_tags"].items())
+        if k.startswith(REASON_PREFIX)
+    }
+    logger.info("  理由            : %s", reasons or "（まだ無い）")
+    excluded = summary["annotation_status"].get("exclude", 0)
+    if excluded and sum(reasons.values()) < excluded:
+        logger.warning(
+            "  exclude %d 件に対して理由は %d 件。理由の入力漏れがある"
+            "（保存ビュー 10-reasoned-decisions で入っている分を確認できる）",
+            excluded,
+            sum(reasons.values()),
+        )
     pending = summary["annotation_status"].get("pending", 0)
     pending += summary["image_status"].get("pending", 0)
     if pending:
@@ -1046,7 +1063,9 @@ def _load_context(config: Config) -> CheckContext | None:
     # 非代表側を抜いておく必要がある（M01-M09/D01-D04 から隠して check を
     # スキップするため）。out_of_scope の判定より後（ラベルで対象外に
     # なったものは D05 の対象にしない）。
-    from .checks.duplicate.d05_cross_dataset_duplicate import detect as detect_cross_dataset
+    from .checks.duplicate.d05_cross_dataset_duplicate import (
+        detect as detect_cross_dataset,
+    )
 
     cross_result = detect_cross_dataset(in_scope, masks)
     if cross_result.excluded_annotation_uids:
@@ -1055,7 +1074,9 @@ def _load_context(config: Config) -> CheckContext | None:
             len(cross_result.excluded_annotation_uids),
         )
     final_records = [
-        r for r in in_scope if r.annotation_uid not in cross_result.excluded_annotation_uids
+        r
+        for r in in_scope
+        if r.annotation_uid not in cross_result.excluded_annotation_uids
     ]
     cross_excluded = [
         r for r in in_scope if r.annotation_uid in cross_result.excluded_annotation_uids

@@ -36,9 +36,12 @@ from .review_schema import (
     FIELD_FINAL,
     FIELD_REVIEW_COMMENT,
     FIELD_REVIEW_REASON,
+    FIELD_REVIEW_REASONS,
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
+    effective_reasons,
+    join_reasons,
 )
 from .review_schema import effective_status as _effective_status
 
@@ -77,19 +80,33 @@ def collect_decisions(
         )
     dataset = fo.load_dataset(name)
 
+    # ``review_reasons`` は後から入れたフィールド。**この版より前に作った DB には
+    # 無い**。select_fields に無いフィールドを渡すと ValueError で落ちるので、
+    # スキーマを見て在るときだけ渡す。ここが落ちると
+    # 「作り直す前に必ず export」という手順そのものが実行できず、
+    # 過去の目視結果を失う。
+    fields = [
+        "file_uid",
+        FIELD_REVIEW_STATUS,
+        FIELD_REVIEW_REASON,
+        FIELD_REVIEWER,
+        FIELD_REVIEWED_AT,
+        FIELD_REVIEW_COMMENT,
+        "tags",
+        FIELD_FINAL,
+    ]
+    if FIELD_REVIEW_REASONS in dataset.get_field_schema():
+        fields.append(FIELD_REVIEW_REASONS)
+    else:
+        logger.info(
+            "この dataset には %s が無い（古い版で作られた DB）。"
+            "理由は reason: タグと自由記述から読む。`review build` で作り直すと"
+            "チェックボックスが使えるようになる",
+            FIELD_REVIEW_REASONS,
+        )
+
     rows: list[dict[str, Any]] = []
-    for sample in dataset.select_fields(
-        [
-            "file_uid",
-            FIELD_REVIEW_STATUS,
-            FIELD_REVIEW_REASON,
-            FIELD_REVIEWER,
-            FIELD_REVIEWED_AT,
-            FIELD_REVIEW_COMMENT,
-            "tags",
-            FIELD_FINAL,
-        ]
-    ):
+    for sample in dataset.select_fields(fields):
         status = _effective_status(
             sample.get_field(FIELD_REVIEW_STATUS), list(sample.tags or [])
         )
@@ -233,7 +250,9 @@ def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
             "comment": d.get("comment", ""),
         }
 
-    rows = [to_row("annotation", "geometry_uid", d) for d in payload.get("decisions", [])]
+    rows = [
+        to_row("annotation", "geometry_uid", d) for d in payload.get("decisions", [])
+    ]
     rows += [to_row("image", "file_uid", d) for d in payload.get("image_decisions", [])]
     return rows
 
@@ -286,12 +305,34 @@ def _is_human(
     return baseline is not None and row["decision"] != baseline
 
 
+def _optional(holder: Any, name: str) -> Any:
+    """設定されていないかもしれないフィールドを読む。
+
+    FiftyOne の ``get_field()`` は ``getattr`` の薄いラッパーで、その
+    インスタンスに一度も設定していない動的属性には ``None`` ではなく
+    ``AttributeError`` を投げる。古い版で作った DB を読むときに要る。
+    """
+    try:
+        return holder.get_field(name)
+    except AttributeError:
+        return None
+
+
 def _row(kind: str, key: str, status: str, holder: Any) -> dict[str, Any]:
+    # 理由は「review_reasons フィールド → reason: タグ → 自由記述」の順に見て、
+    # **機械の理由は捨てる**。manifest が初期値として流し込んだ review_required が
+    # 人間の理由として書き出されるのを防ぐ（それで目視102件の理由が全部
+    # review_required になっていた）。
+    reasons = effective_reasons(
+        _optional(holder, FIELD_REVIEW_REASONS),
+        list(holder.tags or []),
+        _optional(holder, FIELD_REVIEW_REASON),
+    )
     return {
         "kind": kind,
         "key": key,
         "decision": status,
-        "reason": str(holder.get_field(FIELD_REVIEW_REASON) or ""),
+        "reason": join_reasons(reasons),
         "reviewer": str(holder.get_field(FIELD_REVIEWER) or ""),
         "reviewed_at": str(holder.get_field(FIELD_REVIEWED_AT) or ""),
         "comment": str(holder.get_field(FIELD_REVIEW_COMMENT) or ""),

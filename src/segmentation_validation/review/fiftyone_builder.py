@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any
-
-from collections import Counter
 
 from ..config import Config
 from .review_schema import (
@@ -29,6 +28,7 @@ from .review_schema import (
     FIELD_ORIGINAL,
     FIELD_REVIEW_COMMENT,
     FIELD_REVIEW_REASON,
+    FIELD_REVIEW_REASONS,
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
@@ -36,6 +36,7 @@ from .review_schema import (
     SCHEMA_SEED_TAG,
     ReviewStatusTag,
     effective_status,
+    reason_tags,
     review_tag,
 )
 
@@ -92,12 +93,19 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
 
         # 画像単位の判定。annotation を持たない画像はここでしか扱えない。
         sample[FIELD_REVIEW_STATUS] = image["review_status"]
+        sample[FIELD_REVIEW_REASONS] = list(image["review_reasons"])
         sample[FIELD_REVIEW_REASON] = image["review_reason"]
         sample[FIELD_REVIEWER] = image["reviewer"]
         sample[FIELD_REVIEWED_AT] = image["reviewed_at"]
         sample[FIELD_REVIEW_COMMENT] = ""
         sample["n_annotations"] = len(image["annotations"])
-        sample.tags = list(image["auto_tags"]) + [review_tag(image["review_status"])]
+        # reason: タグは review_reasons の写し。絞り込みと保存ビューのために併記する
+        # （正本はフィールド側。review_status と review: タグの関係と同じ）。
+        sample.tags = (
+            list(image["auto_tags"])
+            + [review_tag(image["review_status"])]
+            + reason_tags(image["review_reasons"])
+        )
 
         if image.get("band_path"):
             sample[FIELD_BAND] = fo.Segmentation(mask_path=image["band_path"])
@@ -111,10 +119,13 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
             )
             if annotation.get("mask_path"):
                 detection.mask_path = annotation["mask_path"]
-            detection.tags = list(annotation["auto_tags"]) + [
-                review_tag(annotation["review_status"])
-            ]
+            detection.tags = (
+                list(annotation["auto_tags"])
+                + [review_tag(annotation["review_status"])]
+                + reason_tags(annotation["review_reasons"])
+            )
             detection[FIELD_REVIEW_STATUS] = annotation["review_status"]
+            detection[FIELD_REVIEW_REASONS] = list(annotation["review_reasons"])
             detection[FIELD_REVIEW_REASON] = annotation["review_reason"]
             detection[FIELD_REVIEWER] = annotation["reviewer"]
             detection[FIELD_REVIEWED_AT] = annotation["reviewed_at"]
@@ -147,6 +158,7 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
     if manifest["images"]:
         samples.extend(_seed_choice_candidates(manifest["images"][0]["filepath"]))
 
+    _declare_reason_field(dataset)
     # ``dynamic=True`` が要る。既定の False だと timestamp / review_status /
     # newer_in_pair などの動的属性が **field schema に宣言されない**。App の
     # Edit パネルもサイドバーも宣言済みフィールドしか見ないので、値が入っている
@@ -171,6 +183,32 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
     return dataset
 
 
+def _declare_reason_field(dataset) -> None:
+    """理由フィールドの型を**サンプルを入れる前に**宣言する。
+
+    ``add_samples(dynamic=True)`` は最初に見た値から型を推論し、あとから広げない。
+    理由を持たない annotation の ``[]`` が先に来ると、要素の型が決まらない
+    ``ListField`` として宣言され、``list<str>`` と見なされずに Edit パネルから
+    消える（実機で確認済み）。順序に依存させないため明示的に宣言する。
+
+    ``final`` はまだ存在しないので、親の ``Detections`` から作る。
+    """
+    import fiftyone as fo
+    import fiftyone.core.labels as fol
+
+    try:
+        dataset.add_sample_field(
+            FIELD_FINAL, fo.EmbeddedDocumentField, embedded_doc_type=fol.Detections
+        )
+        dataset.add_sample_field(
+            f"{FIELD_FINAL}.detections.{FIELD_REVIEW_REASONS}",
+            fo.ListField,
+            subfield=fo.StringField,
+        )
+    except Exception as error:  # 宣言できなくてもビルドは続ける
+        logger.warning("理由フィールドを宣言できなかった: %s", error)
+
+
 #: Edit Detection パネルに出す属性と並び。``(名前, 読み取り専用か)``。
 #:
 #: 並びは**上から判断に使う順**。日時を判定欄のすぐ下に置くのは、重複ペアの
@@ -181,6 +219,8 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
 #: 編集できると「直したのに反映されない」という誤解を生む。
 PANEL_ATTRIBUTES: tuple[tuple[str, bool], ...] = (
     (FIELD_REVIEW_STATUS, False),
+    # 判定を決めた直後に理由を選ぶ動きになるよう、status の真下に置く。
+    (FIELD_REVIEW_REASONS, False),
     (FIELD_REVIEW_REASON, False),
     (FIELD_REVIEWER, False),
     (FIELD_REVIEW_COMMENT, False),
@@ -245,6 +285,15 @@ def _apply_label_schema(dataset) -> None:
                 spec["component"] = DEFAULT_COMPONENTS.get(
                     spec.get("type"), spec.get("component")
                 )
+            elif name == FIELD_REVIEW_REASONS:
+                # ★理由だけは候補を固定する。``list<str>`` + ``checkboxes`` のとき
+                # App は CheckboxList を描き、**自由入力の口が無い**
+                # （``dropdown`` / ``text`` は AutocompleteView +
+                # allow_user_input で自由入力が残り、綴りミスが集計を割る）。
+                # values はビルド時に焼き込めるので、捨て Sample で distinct() を
+                # 膨らませる必要はない。
+                spec["component"] = "checkboxes"
+                spec["values"] = list(ALL_SUGGESTED_REASONS)
             attributes.append(spec)
         schema["attributes"] = attributes
         dataset.update_label_schema(FIELD_FINAL, schema)
@@ -295,7 +344,8 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
         status = statuses[i % len(statuses)].value
         reason = reasons[i % len(reasons)]
 
-        # flag:needs_report も同じ理由で候補に出ないので、シードのついでに1回だけ実在させる。
+        # flag:needs_report も同じ理由で候補に出ないので、
+        # シードのついでに1回だけ実在させる。
         extra_tags = [FLAG_NEEDS_REPORT] if i == 0 else []
 
         sample = fo.Sample(
@@ -303,6 +353,10 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
         )
         sample["file_uid"] = ""
         sample[FIELD_REVIEW_STATUS] = status
+        # 空でも**必ず設定する**。get_field() は一度も設定していない動的属性に
+        # 対して None ではなく AttributeError を投げるので、export が落ちる。
+        # 型は _declare_reason_field() が決めるので、ここに実値は要らない。
+        sample[FIELD_REVIEW_REASONS] = []
         sample[FIELD_REVIEW_REASON] = reason
 
         detection = fo.Detection(
@@ -311,6 +365,7 @@ def _seed_choice_candidates(reference_filepath: str) -> list:
         detection.tags = [SCHEMA_SEED_TAG, *extra_tags]
         detection["geometry_uid"] = ""
         detection[FIELD_REVIEW_STATUS] = status
+        detection[FIELD_REVIEW_REASONS] = []
         detection[FIELD_REVIEW_REASON] = reason
         sample[FIELD_FINAL] = fo.Detections(detections=[detection])
         seeds.append(sample)
@@ -334,7 +389,11 @@ def _save_views(dataset, config: Config) -> None:
     # 選択式が事実上の自由入力に見えてしまう（画像のkeep/exclude判定が消えた際に発生）。
     # 件数集計（dataset_summary）は別途 real 変数で除外しているので、
     # ここでシードを混ぜても集計・review export/import の正しさには影響しない。
-    base = dataset
+    #
+    # ``.view()`` が必要。``Dataset`` をそのまま save_view へ渡すと
+    # ``Dataset._serialize() got an unexpected keyword argument 'include_uuids'``
+    # で落ちる（10本のうち 0-all-real だけが作られていなかった原因）。
+    base = dataset.view()
 
     def save(name: str, view, description: str) -> None:
         try:
@@ -408,6 +467,17 @@ def _save_views(dataset, config: Config) -> None:
         base.sort_by(F("tags").contains(FLAG_NEEDS_REPORT), reverse=True),
         "flag:needs_report を先頭に寄せた全件ビュー（絞り込まず順序だけ変える）",
     )
+    save(
+        "10-reasoned-decisions",
+        # ``match`` ではなく ``filter_labels``。7-flagged-for-report は match なので
+        # Sample タグしか見ておらず、Detection に付けた印を拾えない。同じ罠を踏まない。
+        # ここは候補シードを除く —— 実際の判定を見るビューなので、
+        # 候補を実在させるための捨て行が混ざると数が読めなくなる。
+        dataset.match(~F("tags").contains(SCHEMA_SEED_TAG)).filter_labels(
+            FIELD_FINAL, F(FIELD_REVIEW_REASONS).length() > 0, only_matches=True
+        ),
+        "理由を入れた annotation。入れ忘れの洗い出しと、理由別の見直しに使う",
+    )
     logger.info("保存ビュー: %s", dataset.list_saved_views())
 
 
@@ -431,7 +501,9 @@ def dataset_summary(config: Config) -> dict[str, Any]:
     image_status: Counter[str] = Counter()
     for sample in real.select_fields([FIELD_REVIEW_STATUS, "tags", FIELD_FINAL]):
         image_status[
-            effective_status(sample.get_field(FIELD_REVIEW_STATUS), list(sample.tags or []))
+            effective_status(
+                sample.get_field(FIELD_REVIEW_STATUS), list(sample.tags or [])
+            )
         ] += 1
         detections = sample.get_field(FIELD_FINAL)
         for detection in detections.detections if detections else []:

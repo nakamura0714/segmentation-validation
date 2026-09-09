@@ -9,6 +9,15 @@ const R = { UID:0, DS:1, INST:2, STUDY:3, FILE:4, TY:5, CT:6, USR:7, TS:8,
             DC:9, UC:10, FD:11, RSN:12, SRC:13, MSEV:14, AREA:15, NC:16,
             CONT:17, OUT:18, KEPT:19, DGRP:20, REF:21, PAT:22 };
 const rows = D.rows;
+// 理由の表示。値は英語 snake_case（CSVの集計キー）なので、表示だけ日本語に引く。
+// 機械の理由（no_issue_detected 等）は表に無いので生の値がそのまま出る。
+// `|` 区切りの複数理由は分割する（review_reasons で2つ選べるため）。
+const RSN_JA = D.reason_labels || {};
+const rsnParts = (i) => (V.rsn[i] || "").split("|").filter(Boolean);
+const rsnText = (i) => {
+  const parts = rsnParts(i);
+  return parts.length ? parts.map((r) => RSN_JA[r] || r).join(" / ") : (V.rsn[i] || "");
+};
 function countCases(rs) {
   const p = new Set(), s = new Set(), im = new Set();
   for (const r of rs) {
@@ -454,7 +463,7 @@ function annRow(r) {
   dTd.append(dName);
   dTd.style.whiteSpace = "nowrap";
   tr.append(dTd);
-  const rTd = el("td", "mono", V.rsn[r[R.RSN]]);
+  const rTd = el("td", "mono", rsnText(r[R.RSN]));
   rTd.style.fontSize = "11px";
   tr.append(rTd);
 
@@ -640,8 +649,9 @@ function caseRow(r) {
   tr.append(stTd);
   const rsn = el("td");
   const flags = el("div", "case-flags");
-  const seen = new Set(r[C.RSN].map((i) => V.rsn[i]));
-  for (const f of r[C.FLAG]) seen.add(V.rsn[f[4]]);
+  const seen = new Set();
+  for (const i of r[C.RSN]) for (const p of rsnParts(i)) seen.add(RSN_JA[p] || p);
+  for (const f of r[C.FLAG]) for (const p of rsnParts(f[4])) seen.add(RSN_JA[p] || p);
   if (!seen.size) {
     const dash = el("span", null, "—");
     dash.style.color = "var(--ink-3)";
@@ -684,7 +694,7 @@ function caseRow(r) {
         line.append(el("span", `dot ${V.fd[a[R.FD]]}`));
         const text = el("span", "mono",
           ` ${V.fd[a[R.FD]]}　${a[R.UID].slice(0, 8)}　${a[R.STUDY]} / ${a[R.FILE]}`
-          + `　${V.rsn[a[R.RSN]]}`);
+          + `　${rsnText(a[R.RSN])}`);
         text.style.fontSize = "11.5px";
         line.append(text);
         h.append(line);
@@ -701,7 +711,7 @@ function caseRow(r) {
         line.style.cssText = "font-size:12.5px;margin-bottom:4px";
         line.append(el("span", `dot ${f[3]}`));
         const text = el("span", "mono",
-          ` ${f[3]}　${f[1]} / ${f[0]}　${f[2]}　${V.rsn[f[4]]}`);
+          ` ${f[3]}　${f[1]} / ${f[0]}　${f[2]}　${rsnText(f[4])}`);
         text.style.fontSize = "11.5px";
         line.append(text);
         h.append(line);

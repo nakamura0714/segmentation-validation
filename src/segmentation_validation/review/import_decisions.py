@@ -22,10 +22,13 @@ from .review_schema import (
     FIELD_FINAL,
     FIELD_REVIEW_COMMENT,
     FIELD_REVIEW_REASON,
+    FIELD_REVIEW_REASONS,
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
+    effective_reasons,
     is_review,
+    reason_tags,
     review_tag,
 )
 
@@ -72,11 +75,18 @@ def import_decisions(path: Path, config: Config) -> dict[str, int]:
 def _apply(holder: Any, verdict: dict[str, Any]) -> None:
     """1件の判定をフィールドとタグへ反映する。"""
     status = verdict["decision"]
+    # 理由は候補に当てはまるものを review_reasons へ、当てはまらない記述だけを
+    # 自由記述欄へ入れる。``review_decisions.json`` の reason は "a|b" の形。
+    raw_reason = verdict.get("reason") or ""
+    reasons = effective_reasons(raw_reason)
     holder[FIELD_REVIEW_STATUS] = status
-    holder[FIELD_REVIEW_REASON] = verdict.get("reason") or ""
+    holder[FIELD_REVIEW_REASONS] = reasons
+    holder[FIELD_REVIEW_REASON] = "" if reasons else raw_reason
     holder[FIELD_REVIEWER] = verdict.get("reviewer") or ""
     holder[FIELD_REVIEWED_AT] = verdict.get("reviewed_at") or ""
     holder[FIELD_REVIEW_COMMENT] = verdict.get("comment") or ""
-    # review: タグは張り替える。auto: タグは機械のものなので保持する。
+    # review: と reason: のタグは張り替える。auto: は機械のものなので保持する。
+    # ★reason: を貼り直すのが要る。is_review() は reason: も人間のものと見なす
+    # ので、貼り直さないと import のたびに理由タグが消えていた。
     kept = [t for t in (holder.tags or []) if not is_review(t)]
-    holder.tags = kept + [review_tag(status)]
+    holder.tags = kept + [review_tag(status)] + reason_tags(reasons)

@@ -23,6 +23,7 @@ from ..checks.base import CheckStatus, Issue
 from ..config import Config
 from ..core.labels import label_selectors
 from ..core.measure import ROLE_MASK, FileMeasurement, MaskMeasurement
+from ..review.review_schema import REASON_JA
 from ..selection.decisions import (
     CASE_STATUS_JA,
     CaseStatus,
@@ -425,6 +426,9 @@ def build_payload(
         "cases_table": cases_table,
         "precision": _precision_block(issues, config),
         "labels": label_composition(decisions, config),
+        # 理由の日本語表示。値は英語 snake_case のままなので、
+        # 表示だけここで引く（機械の理由は表に無いので生の値が出る）。
+        "reason_labels": dict(REASON_JA),
         "checks": inventory,
         "families": family_summary(inventory, issues, decisions, config),
         "rows": rows,

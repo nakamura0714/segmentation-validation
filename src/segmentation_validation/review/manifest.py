@@ -22,7 +22,7 @@ from ..core.records import FileGroup
 from ..selection.decisions import Decision, SelectionDecision
 from ..selection.image_decisions import ImageDecision
 from .export_assets import AssetPaths
-from .review_schema import auto_tag
+from .review_schema import MACHINE_REASONS, auto_tag, effective_reasons
 
 
 @dataclass
@@ -40,6 +40,8 @@ class ManifestAnnotation:
     auto_tags: list[str] = field(default_factory=list)
     # 現在の採否。人間の判定が既にあればそれが入る。
     review_status: str = Decision.PENDING.value
+    # 人間が選んだ理由。**機械の理由は入れない**（下の _human_reasons 参照）。
+    review_reasons: list[str] = field(default_factory=list)
     review_reason: str = ""
     reviewer: str = ""
     reviewed_at: str = ""
@@ -67,6 +69,7 @@ class ManifestImage:
     # 画像単位の採否（未アノテーションのビューはここでしか判定できない）
     review_status: str
     review_reason: str
+    review_reasons: list[str] = field(default_factory=list)
     reviewer: str = ""
     reviewed_at: str = ""
     auto_tags: list[str] = field(default_factory=list)
@@ -123,9 +126,7 @@ def build_manifest(
                     original_mask_path=(
                         str(asset.originals.get(record.geometry_uid) or "") or None
                     ),
-                    original_bounding_box=asset.original_boxes.get(
-                        record.geometry_uid
-                    ),
+                    original_bounding_box=asset.original_boxes.get(record.geometry_uid),
                     auto_tags=sorted(
                         {auto_tag(i.check_id) for i in found if _is_auto_worthy(i)}
                     ),
@@ -134,7 +135,8 @@ def build_manifest(
                         if decision
                         else Decision.PENDING.value
                     ),
-                    review_reason=decision.reason if decision else "",
+                    review_reasons=_human_reasons(decision),
+                    review_reason=_human_note(decision),
                     reviewer=(decision.reviewer or "") if decision else "",
                     reviewed_at=(decision.reviewed_at or "") if decision else "",
                     attributes={
@@ -164,7 +166,8 @@ def build_manifest(
                     if image_decision
                     else Decision.KEEP.value
                 ),
-                review_reason=image_decision.reason if image_decision else "",
+                review_reasons=_human_reasons(image_decision),
+                review_reason=_human_note(image_decision),
                 reviewer=(image_decision.reviewer or "") if image_decision else "",
                 reviewed_at=(image_decision.reviewed_at or "")
                 if image_decision
@@ -225,6 +228,36 @@ def _issue_row(issue: Issue) -> dict[str, Any]:
         "message": issue.message,
         "detail": issue.detail,
     }
+
+
+def _human_reasons(decision: Any) -> list[str]:
+    """採否から**人間が選んだ理由だけ**を取り出す。
+
+    ``decision.reason`` は機械の理由と人間の理由が同じ1列を共有している。
+    目視待ちの annotation では機械の ``review_required`` が入っているので、
+    そのまま App の理由欄へ流すと「人間が review_required と入力した」ことに
+    なってしまう。実際にそうなっていて、目視102件の理由が全部
+    ``review_required`` になっていた。候補に無い値はここで落とす。
+    """
+    if decision is None:
+        return []
+    return effective_reasons(decision.reason)
+
+
+def _human_note(decision: Any) -> str:
+    """自由記述の理由。候補に当てはまらない人間の記述だけを残す。
+
+    機械の理由（``review_required`` 等）は空にする。App の入力欄に前回の値が
+    残っていること自体は親切だが、機械の値が残っていると
+    「理由が記録されている」ように見えて記録されない。
+    """
+    if decision is None:
+        return ""
+    note = decision.reason or ""
+    if note in MACHINE_REASONS or effective_reasons(note):
+        # 機械の理由、または候補で表せる理由。自由記述欄には何も残さない。
+        return ""
+    return note
 
 
 def _display_note(adjusted: dict[str, Any] | None) -> dict[str, Any]:

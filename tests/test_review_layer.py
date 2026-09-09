@@ -18,6 +18,7 @@ from dataclasses import replace
 import pytest
 from conftest import make_record
 
+from segmentation_validation.review import review_schema as rs
 from segmentation_validation.review.export_assets import MIN_DISPLAY_PX, _json_box
 from segmentation_validation.review.export_decisions import (
     _baseline,
@@ -25,7 +26,12 @@ from segmentation_validation.review.export_decisions import (
     _exported_keys,
     _is_human,
 )
-from segmentation_validation.review.manifest import _duplicate_hint, _elapsed_ja
+from segmentation_validation.review.manifest import (
+    _duplicate_hint,
+    _elapsed_ja,
+    _human_note,
+    _human_reasons,
+)
 from segmentation_validation.review.review_schema import (
     AUTO_PREFIX,
     REVIEW_PREFIX,
@@ -36,6 +42,7 @@ from segmentation_validation.review.review_schema import (
     parse_review_tag,
     review_tag,
 )
+from segmentation_validation.selection.decisions import build_decisions
 
 SHAPE = (2400, 2000)  # (height, width)
 
@@ -322,3 +329,164 @@ def test_採否がまだ無ければ何も返さない(config):
 def test_経過時間の丸め(seconds, expected):
     """「14秒差」と「3日差」の違いが判断を分ける。桁は揃えない。"""
     assert _elapsed_ja(seconds) == expected
+
+
+# --------------------------------------------------- exclude の理由（チェックボックス）
+
+
+def test_候補と機械の理由は重ならない():
+    """★``effective_reasons`` は「候補に絞る」ことで機械の理由を落としている。
+
+    どちらかに同じ値を足すとその前提が崩れ、機械の理由が人間の理由として
+    書き出されるようになる（実際に ``review_required`` でそれが起きていた）。
+    """
+    assert not set(rs.ALL_SUGGESTED_REASONS) & rs.MACHINE_REASONS
+
+
+def test_機械の理由は人間の理由として返さない():
+    """★これが今回の不具合の核。
+
+    manifest が初期値として流し込んだ ``review_required`` が人間の理由として
+    export され、目視102件の理由が全部それになっていた。
+    """
+    for machine in ("review_required", "no_issue_detected", "older_exact_duplicate"):
+        assert rs.effective_reasons(None, [], machine) == [], machine
+        assert rs.effective_reasons([machine], [], "") == [], machine
+        assert rs.effective_reasons(None, [rs.reason_tag(machine)], "") == [], machine
+
+
+def test_採否そのものを理由として返さない():
+    """``build_decisions`` は人間の理由が空だと採否を reason に入れる。
+
+    それは「理由が無い」ことの表現なので、理由として読み戻してはいけない。
+    """
+    assert rs.effective_reasons(None, [], "exclude") == []
+    assert rs.effective_reasons(None, [], "keep") == []
+
+
+def test_フィールドが理由の正本():
+    """タグはフィールドの写し。食い違ったらフィールドを採る。"""
+    reasons = rs.effective_reasons(
+        ["invalid_duplicate"], [rs.reason_tag("outside_body")], "wrong_label"
+    )
+    assert reasons == ["invalid_duplicate"]
+
+
+def test_フィールドが空ならタグを見る():
+    """App でタグだけ付けた場合を拾う（``effective_status`` と同じ構え）。"""
+    reasons = rs.effective_reasons(
+        [], ["auto:s05_outside_body", rs.reason_tag("outside_body")], ""
+    )
+    assert reasons == ["outside_body"]
+
+
+def test_タグも空なら自由記述を見る():
+    """`review_reasons` を入れる前に自由記述で運用していた分の後方互換。"""
+    assert rs.effective_reasons([], [], "lateral_view") == ["lateral_view"]
+
+
+def test_理由は候補の並び順に正規化する():
+    """入力順で ``a|b`` と ``b|a`` に割れると集計が分かれる。"""
+    order = rs.effective_reasons(["older_duplicate", "invalid_duplicate"])
+    assert order == ["invalid_duplicate", "older_duplicate"]
+    assert rs.effective_reasons(["invalid_duplicate", "older_duplicate"]) == order
+    # タグ経路でも同じ（集合を経由するので順序が不定になりやすい）。
+    assert rs.effective_reasons([], rs.reason_tags(order[::-1])) == order
+
+
+def test_候補外の値は拾わない():
+    """App では tags に何でも打てる。知らない値を理由にすると集計が壊れる。"""
+    assert rs.effective_reasons(["nonsense"], [], "") == []
+    assert rs.effective_reasons([], ["reason:nonsense"], "") == []
+    assert rs.parse_reason_tag("reason:nonsense") is None
+    assert rs.reason_tags(["invalid_duplicate", "nonsense"]) == [
+        "reason:invalid_duplicate"
+    ]
+
+
+def test_reasonタグは往復する():
+    for reason in rs.ALL_SUGGESTED_REASONS:
+        assert rs.parse_reason_tag(rs.reason_tag(reason)) == reason
+
+
+def test_reviewタグはreasonタグとして解釈されない():
+    assert rs.parse_reason_tag("review:exclude") is None
+    assert rs.parse_reason_tag("auto:s05_outside_body") is None
+    assert rs.parse_review_tag(rs.reason_tag("outside_body")) is None
+
+
+def test_reasonタグは人間のものとして扱われる():
+    """★``is_review()`` が False になると ``review import`` が消さなくなる代わりに、
+    古い理由タグが貼り替えられず残る。True であることが前提。
+    """
+    tag = rs.reason_tag("invalid_duplicate")
+    assert rs.is_review(tag) is True
+    assert rs.is_auto(tag) is False
+
+
+def test_区切りの往復():
+    reasons = ["invalid_duplicate", "older_duplicate"]
+    assert rs.join_reasons(reasons) == "invalid_duplicate|older_duplicate"
+    assert rs.split_reasons("invalid_duplicate|older_duplicate") == reasons
+    assert rs.split_reasons(None) == []
+    assert rs.split_reasons("") == []
+    assert rs.split_reasons(reasons) == reasons
+
+
+def test_古いと重複は別の理由():
+    """同じマスクが2枚あることと、自分が古い方であることは独立した事実。"""
+    assert "invalid_duplicate" in rs.SUGGESTED_REASONS["exclude"]
+    assert "older_duplicate" in rs.SUGGESTED_REASONS["exclude"]
+
+
+def test_全候補に日本語表示がある():
+    """ダッシュボードと summary.md が引くので、欠けると値が生で出る。"""
+    missing = [r for r in rs.ALL_SUGGESTED_REASONS if r not in rs.REASON_JA]
+    assert missing == []
+
+
+# ------------------------------------------- manifest が機械の理由を流し込まない
+
+
+def make_decision(config, reason: str, source=None):
+    from segmentation_validation.selection.decisions import DecisionSource
+
+    decision = build_decisions([make_record("A")], [], config)[0]
+    return replace(
+        decision,
+        reason=reason,
+        decision_source=source or DecisionSource.HUMAN,
+    )
+
+
+def test_機械の理由は理由欄に流し込まない(config):
+    """★目視待ちの annotation には機械の review_required が入っている。
+
+    それを App の理由欄に初期値として置くと、人間が触らないまま
+    「人間が review_required と入力した」ことになる。
+    """
+    decision = make_decision(config, "review_required")
+
+    assert _human_reasons(decision) == []
+    assert _human_note(decision) == ""
+
+
+def test_候補の理由はチェックボックス側に入る(config):
+    decision = make_decision(config, "invalid_duplicate|older_duplicate")
+
+    assert _human_reasons(decision) == ["invalid_duplicate", "older_duplicate"]
+    # 二重に持つと食い違うので自由記述欄には残さない。
+    assert _human_note(decision) == ""
+
+
+def test_候補外の記述は自由記述欄に残る(config):
+    """候補で表せないことを書きたいときの逃げ道。"""
+    decision = make_decision(config, "Dr確認済みだが要再確認")
+
+    assert _human_reasons(decision) == []
+    assert _human_note(decision) == "Dr確認済みだが要再確認"
+
+
+def test_採否が無ければ理由も空(config):
+    assert _human_reasons(None) == []
+    assert _human_note(None) == ""
