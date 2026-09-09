@@ -1508,6 +1508,12 @@ def _read_review_decisions(
     FiftyOne の DB を正本にしないので、人間の判定は必ずこのファイル経由で流す。
     戻り値は ``(annotation単位, 画像単位)``。画像単位は annotation を持たない
     画像（未アノテーションのビュー）の採否で、キーは ``file_uid``。
+
+    annotation単位のキーは ``annotation_uid``（``f"{dataset_id}::{geometry_uid}"``）。
+    geometry_uid は cross-dataset 重複でデータセットをまたいで再利用される
+    ため、bare geometry_uid をキーにすると無関係な別データセットの
+    annotation に人間の判定が誤って適用される
+    （``selection/decisions.py::build_decisions`` 参照）。
     """
     import json
 
@@ -1517,24 +1523,43 @@ def _read_review_decisions(
     if not isinstance(payload, dict):
         payload = {"decisions": payload, "image_decisions": []}
 
-    def build(rows: list, key: str) -> dict[str, HumanDecision]:
-        result: dict[str, HumanDecision] = {}
-        for row in rows:
-            uid = row[key]
-            result[uid] = HumanDecision(
-                geometry_uid=uid,
-                decision=Decision(row["decision"]),
-                reason=row.get("reason") or "",
-                reviewer=row.get("reviewer"),
-                reviewed_at=row.get("reviewed_at"),
-                comment=row.get("comment"),
+    annotations: dict[str, HumanDecision] = {}
+    for row in payload.get("decisions") or []:
+        uid = row["geometry_uid"]
+        dataset_id = row.get("dataset_id")
+        if not dataset_id:
+            # 古い形式（dataset_id を持たない review_decisions.json）。
+            # 安全側に倒し、この行は無視する（誤爆させるよりは目視漏れの方がまし）。
+            logger.warning(
+                "review_decisions.json の annotation行に dataset_id が無い"
+                "（旧形式）。誤って別データセットへ適用されるのを防ぐため無視する: "
+                "geometry_uid=%s",
+                uid,
             )
-        return result
+            continue
+        annotations[f"{dataset_id}::{uid}"] = HumanDecision(
+            geometry_uid=uid,
+            decision=Decision(row["decision"]),
+            reason=row.get("reason") or "",
+            reviewer=row.get("reviewer"),
+            reviewed_at=row.get("reviewed_at"),
+            comment=row.get("comment"),
+            dataset_id=dataset_id,
+        )
 
-    return (
-        build(payload.get("decisions") or [], "geometry_uid"),
-        build(payload.get("image_decisions") or [], "file_uid"),
-    )
+    images: dict[str, HumanDecision] = {}
+    for row in payload.get("image_decisions") or []:
+        uid = row["file_uid"]
+        images[uid] = HumanDecision(
+            geometry_uid=uid,
+            decision=Decision(row["decision"]),
+            reason=row.get("reason") or "",
+            reviewer=row.get("reviewer"),
+            reviewed_at=row.get("reviewed_at"),
+            comment=row.get("comment"),
+        )
+
+    return annotations, images
 
 
 def _split(value: str | None) -> list[str] | None:

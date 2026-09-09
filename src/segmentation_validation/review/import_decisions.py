@@ -41,7 +41,15 @@ def import_decisions(path: Path, config: Config) -> dict[str, int]:
     import fiftyone as fo
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    by_uid = {d["geometry_uid"]: d for d in payload.get("decisions", [])}
+    # annotation は (dataset_id, geometry_uid) で突合する。geometry_uid は
+    # cross-dataset 重複でデータセットをまたいで再利用されるため、bare
+    # geometry_uid だけで突合すると無関係な別データセットの annotation に
+    # 判定が誤って書き戻される。dataset_id を持たない旧形式の行は無視する。
+    by_uid = {
+        (d["dataset_id"], d["geometry_uid"]): d
+        for d in payload.get("decisions", [])
+        if d.get("dataset_id")
+    }
     by_file = {d["file_uid"]: d for d in payload.get("image_decisions", [])}
 
     name = config.review.dataset_name
@@ -56,10 +64,12 @@ def import_decisions(path: Path, config: Config) -> dict[str, int]:
             _apply(sample, verdict)
             applied["images"] += 1
 
+        # ★dataset_id は Sample 側のフィールド。Detection には無い。
+        dataset_id = sample.get_field("dataset_id") or ""
         detections = sample.get_field(FIELD_FINAL)
         for detection in detections.detections if detections else []:
             uid = detection.get_field("geometry_uid")
-            found = by_uid.get(uid) if uid else None
+            found = by_uid.get((dataset_id, uid)) if uid else None
             if found is not None:
                 _apply(detection, found)
                 applied["annotations"] += 1

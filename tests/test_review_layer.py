@@ -1,11 +1,15 @@
 """目視レビュー層のうち fiftyone を必要としない部分。
 
-**過去にここで2件の不具合が出た。** 両方とも「目視の成果が静かに壊れる」種類:
+**過去にここで3件の不具合が出た。** いずれも「目視の成果が静かに壊れる」種類:
 
 1. マスクを持たない bbox 11件が manifest から落ちていた。
    ところがこの11件は M07（座標が壊れている）で、**座標そのものが目視対象**だった。
 2. `review export` が機械の判定まで人間の判定として書き出していた（273件 → 実際は3件）。
    `select` で `decision_source=human` になり、reviewer 不在で不変条件が落ちた。
+3. `build_manifest`/`build_decisions` が ``geometry_uid`` だけで判定を引いていた。
+   cross-dataset 重複（D05）では同じ ``geometry_uid`` が複数データセットに
+   再利用されるため、無関係な別データセットの annotation の判定
+   （exclude/pending 等）が誤って割り当てられていた（実データで2172件確認）。
 
 `auto:` と `review:` を混ぜないことも Precision 計算の前提なので固定する。
 """
@@ -14,12 +18,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
-from conftest import make_record
+from conftest import make_group, make_record
 
 from segmentation_validation.review import review_schema as rs
-from segmentation_validation.review.export_assets import MIN_DISPLAY_PX, _json_box
+from segmentation_validation.review.export_assets import (
+    MIN_DISPLAY_PX,
+    AssetPaths,
+    _json_box,
+)
 from segmentation_validation.review.export_decisions import (
     _baseline,
     _effective_status,
@@ -31,6 +40,7 @@ from segmentation_validation.review.manifest import (
     _elapsed_ja,
     _human_note,
     _human_reasons,
+    build_manifest,
 )
 from segmentation_validation.review.review_schema import (
     AUTO_PREFIX,
@@ -42,7 +52,7 @@ from segmentation_validation.review.review_schema import (
     parse_review_tag,
     review_tag,
 )
-from segmentation_validation.selection.decisions import build_decisions
+from segmentation_validation.selection.decisions import Decision, build_decisions
 
 SHAPE = (2400, 2000)  # (height, width)
 
@@ -93,11 +103,20 @@ def test_どちらも未判定ならpending():
 # --------------------------------------------------------------- 人間の判定の切り分け
 
 
+DATASET_ID = "DS"
+#: annotation側のbaselineキーは annotation_uid（f"{dataset_id}::{geometry_uid}"）。
+#: geometry_uid は cross-dataset 重複でデータセットをまたいで再利用されるため、
+#: bare geometry_uid だけをキーにすると別データセットの annotation の
+#: baseline を誤って参照してしまう（_baseline 参照）。
+KEY_A = f"{DATASET_ID}::A"
+
+
 def make_manifest(annotation_status: str, image_status: str) -> dict:
     return {
         "images": [
             {
                 "file_uid": "IMG",
+                "dataset_id": DATASET_ID,
                 "review_status": image_status,
                 "annotations": [
                     {"geometry_uid": "A", "review_status": annotation_status}
@@ -113,7 +132,7 @@ def test_基準線から変わっていれば人間の判定():
     ann, img = _baseline(manifest)
 
     row = {"decision": "exclude", "reviewer": ""}
-    assert _is_human(row, ann["A"], manifest) is True
+    assert _is_human(row, ann[KEY_A], manifest) is True
     assert _is_human(row, img["IMG"], manifest) is True
 
 
@@ -123,7 +142,7 @@ def test_基準線と同じなら機械の判定():
     ann, _ = _baseline(manifest)
 
     row = {"decision": "keep", "reviewer": ""}
-    assert _is_human(row, ann["A"], manifest) is False
+    assert _is_human(row, ann[KEY_A], manifest) is False
 
 
 def test_reviewerが入っていれば無条件で人間の判定():
@@ -131,7 +150,7 @@ def test_reviewerが入っていれば無条件で人間の判定():
     ann, _ = _baseline(manifest)
 
     row = {"decision": "keep", "reviewer": "me@example.com"}
-    assert _is_human(row, ann["A"], manifest) is True
+    assert _is_human(row, ann[KEY_A], manifest) is True
 
 
 def test_manifestが無ければreviewerだけで判断する():
@@ -147,14 +166,23 @@ def test_export済みのキーを読める(tmp_path):
     path.write_text(
         json.dumps(
             {
-                "decisions": [{"geometry_uid": "A", "decision": "keep"}],
+                "decisions": [
+                    {
+                        "dataset_id": DATASET_ID,
+                        "geometry_uid": "A",
+                        "decision": "keep",
+                    }
+                ],
                 "image_decisions": [{"file_uid": "IMG", "decision": "exclude"}],
             }
         ),
         encoding="utf-8",
     )
 
-    assert _exported_keys(path) == {("annotation", "A"), ("image", "IMG")}
+    assert _exported_keys(path) == {
+        ("annotation", DATASET_ID, "A"),
+        ("image", "", "IMG"),
+    }
 
 
 def test_ファイルが無ければ空(tmp_path):
@@ -490,3 +518,61 @@ def test_候補外の記述は自由記述欄に残る(config):
 def test_採否が無ければ理由も空(config):
     assert _human_reasons(None) == []
     assert _human_note(None) == ""
+
+
+# --------------------- cross-dataset 重複でgeometry_uidが衝突しても混同しない
+
+
+def test_manifestはgeometry_uid衝突時も正しいannotationに判定を割り当てる(
+    config,
+):
+    """★実データで2172件確認した不具合の再現。
+
+    D05（cross-dataset 重複）では同じ ``geometry_uid`` が別データセットの
+    annotation に再利用される。``build_manifest`` が bare geometry_uid で
+    決定/Issueを引いていたため、片方の決定（exclude）がもう片方
+    （本来 pending のはず）へ誤って割り当てられていた。
+    """
+    record_a = make_record("X", dataset_id="DS1", file="F1")
+    record_b = make_record("X", dataset_id="DS2", file="F2")
+    group_a = make_group((record_a,), dataset_id="DS1", file="F1")
+    group_b = make_group((record_b,), dataset_id="DS2", file="F2")
+
+    # 実際には D05 が決める採否だが、ここでは manifest 側の突き合わせだけを
+    # 見たいので、build_decisions の出力を直接書き換えて2通りの決定を作る。
+    decision_a = replace(
+        build_decisions([record_a], [], config)[0],
+        final_decision=Decision.PENDING,
+        reason="review_required",
+    )
+    decision_b = replace(
+        build_decisions([record_b], [], config)[0],
+        final_decision=Decision.EXCLUDE,
+        reason="cross_dataset_duplicate",
+    )
+
+    box = [0.1, 0.1, 0.2, 0.2]
+    assets = {
+        group_a.file_uid: AssetPaths(
+            file_uid=group_a.file_uid, image=Path("F1.png"), boxes={"X": box}
+        ),
+        group_b.file_uid: AssetPaths(
+            file_uid=group_b.file_uid, image=Path("F2.png"), boxes={"X": box}
+        ),
+    }
+
+    manifest = build_manifest(
+        [group_a, group_b],
+        assets,
+        [decision_a, decision_b],
+        [],
+        [],
+        config,
+    )
+
+    by_file = {image["file_uid"]: image for image in manifest["images"]}
+    ann_a = by_file[group_a.file_uid]["annotations"][0]
+    ann_b = by_file[group_b.file_uid]["annotations"][0]
+
+    assert ann_a["review_status"] == "pending", "DS1 側は本来 pending のまま"
+    assert ann_b["review_status"] == "exclude", "DS2 側は本来 exclude のまま"

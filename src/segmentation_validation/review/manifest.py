@@ -111,7 +111,7 @@ def build_manifest(
     # （cross-dataset 重複。D05 参照）ので、bare geometry_uid をキーにすると
     # 別データセットの決定/Issueが誤って割り当てられる。``annotation_uid``
     # （``f"{dataset_id}::{geometry_uid}"``）で引く。
-    by_uid = {d.annotation_uid: d for d in decisions}
+    by_uid = {f"{d.dataset_id}::{d.geometry_uid}": d for d in decisions}
     by_file = {d.file_uid: d for d in image_decisions}
     spot_check_file_uids = spot_check_file_uids or frozenset()
 
@@ -140,8 +140,8 @@ def build_manifest(
             box = asset.boxes.get(record.geometry_uid)
             if box is None:
                 continue
-            decision = by_uid.get(record.geometry_uid)
-            found = issues_by_uid.get(record.geometry_uid, [])
+            decision = by_uid.get(record.annotation_uid)
+            found = issues_by_uid.get(record.annotation_uid, [])
             annotations.append(
                 ManifestAnnotation(
                     geometry_uid=record.geometry_uid,

@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 COLUMNS = (
     "kind",
+    # ★dataset_id: geometry_uid は cross-dataset で重複するため突合キーの一部
+    "dataset_id",
     "key",
     "decision",
     "reason",
@@ -94,6 +96,9 @@ def collect_decisions(
         FIELD_REVIEW_COMMENT,
         "tags",
         FIELD_FINAL,
+        # ★dataset_id は Sample 側のフィールド。Detection には無いので、
+        # annotation の突合キーはここから取る。
+        "dataset_id",
     ]
     if FIELD_REVIEW_REASONS in dataset.get_field_schema():
         fields.append(FIELD_REVIEW_REASONS)
@@ -116,6 +121,7 @@ def collect_decisions(
         ):
             rows.append(row)
 
+        dataset_id = _optional(sample, "dataset_id") or ""
         detections = sample.get_field(FIELD_FINAL)
         for detection in detections.detections if detections else []:
             uid = detection.get_field("geometry_uid")
@@ -124,9 +130,12 @@ def collect_decisions(
             label_status = _effective_status(
                 detection.get_field(FIELD_REVIEW_STATUS), list(detection.tags or [])
             )
-            row = _row("annotation", uid, label_status, detection)
+            row = _row(
+                "annotation", uid, label_status, detection, dataset_id=dataset_id
+            )
+            annotation_uid = f"{dataset_id}::{uid}"
             if label_status in DECIDED and _is_human(
-                row, baseline_ann.get(uid), manifest
+                row, baseline_ann.get(annotation_uid), manifest
             ):
                 rows.append(row)
 
@@ -159,7 +168,7 @@ def unexported_human_decisions(
         # dataset がまだ無い / fiftyone が無い。守るものが無いので空。
         return []
     exported = _exported_keys(exported_path)
-    return [row for row in rows if (row["kind"], row["key"]) not in exported]
+    return [row for row in rows if _merge_key(row) not in exported]
 
 
 def human_decisions_in_db(config: Config) -> list[dict[str, Any]]:
@@ -191,12 +200,16 @@ def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> N
     した方（＝より新しい状態）を優先する。これでモジュール冒頭の docstring
     にある不変条件（DB削除→再構築→import で判定が戻る）を rebuild を挟んでも
     保てる。
+
+    annotation の突合キーは ``(dataset_id, geometry_uid)``。geometry_uid は
+    cross-dataset 重複でデータセットをまたいで再利用されるため、bare
+    geometry_uid だけで突合すると別データセットの判定を上書きしてしまう。
     """
-    merged: dict[tuple[str, str], dict[str, Any]] = {
-        (row["kind"], row["key"]): row for row in _read_existing_rows(path)
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {
+        _merge_key(row): row for row in _read_existing_rows(path)
     }
     for row in rows:
-        merged[(row["kind"], row["key"])] = row
+        merged[_merge_key(row)] = row
     all_rows = list(merged.values())
 
     payload = {
@@ -206,9 +219,11 @@ def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> N
             "n_annotations": sum(1 for r in all_rows if r["kind"] == "annotation"),
             "n_images": sum(1 for r in all_rows if r["kind"] == "image"),
         },
-        # ``select`` が読む形。annotation は geometry_uid、画像は file_uid がキー。
+        # ``select`` が読む形。annotation は dataset_id + geometry_uid、
+        # 画像は file_uid がキー。
         "decisions": [
             {
+                "dataset_id": r["dataset_id"],
                 "geometry_uid": r["key"],
                 "decision": r["decision"],
                 "reason": r["reason"],
@@ -257,10 +272,13 @@ def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
         logger.warning("%s を読めない。既存の判定は無いものとして扱う", path)
         return []
 
-    def to_row(kind: str, key_field: str, d: dict[str, Any]) -> dict[str, Any]:
+    def to_row(
+        kind: str, key_field: str, d: dict[str, Any], dataset_id: str | None = None
+    ) -> dict[str, Any]:
         return {
             "kind": kind,
             "key": d[key_field],
+            "dataset_id": d.get("dataset_id") if dataset_id is None else dataset_id,
             "decision": d["decision"],
             "reason": d.get("reason", ""),
             "reviewer": d.get("reviewer", ""),
@@ -271,14 +289,28 @@ def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
     rows = [
         to_row("annotation", "geometry_uid", d) for d in payload.get("decisions", [])
     ]
-    rows += [to_row("image", "file_uid", d) for d in payload.get("image_decisions", [])]
+    rows += [
+        to_row("image", "file_uid", d, dataset_id=None)
+        for d in payload.get("image_decisions", [])
+    ]
     return rows
 
 
 # ------------------------------------------------------------------ internal
 
 
-def _exported_keys(path: Path) -> set[tuple[str, str]]:
+def _merge_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    """``write_decisions`` のマージ/突合キー。
+
+    annotation は geometry_uid が cross-dataset 重複でデータセットをまたいで
+    再利用されるため、``dataset_id`` を含めないと別データセットの判定を
+    上書きしてしまう。画像（kind="image"）は file_uid が全域一意なので
+    dataset_id 部分は空文字で揃える。
+    """
+    return (row["kind"], row.get("dataset_id") or "", row["key"])
+
+
+def _exported_keys(path: Path) -> set[tuple[str, str, str]]:
     """``review_decisions.json`` に既に書き出されている判定のキー。"""
     if not path.exists():
         return set()
@@ -288,23 +320,34 @@ def _exported_keys(path: Path) -> set[tuple[str, str]]:
         # 読めないファイルを「全部 export 済み」と解釈してはいけない。
         logger.warning("%s を読めない。未 export 扱いにする", path)
         return set()
-    keys = {("annotation", d["geometry_uid"]) for d in payload.get("decisions", [])}
-    keys |= {("image", d["file_uid"]) for d in payload.get("image_decisions", [])}
+    keys = {
+        ("annotation", d.get("dataset_id") or "", d["geometry_uid"])
+        for d in payload.get("decisions", [])
+    }
+    keys |= {("image", "", d["file_uid"]) for d in payload.get("image_decisions", [])}
     return keys
 
 
 def _baseline(
     manifest: dict[str, Any] | None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    """manifest に記録された採否。これと違えば人間が変えたということ。"""
+    """manifest に記録された採否。これと違えば人間が変えたということ。
+
+    annotation側のキーは ``f"{dataset_id}::{geometry_uid}"``（annotation_uid）。
+    geometry_uid は cross-dataset 重複でデータセットをまたいで再利用されるため、
+    bare geometry_uid だけをキーにすると別データセットの annotation の
+    baseline を誤って参照してしまう。
+    """
     if not manifest:
         return {}, {}
     annotations: dict[str, str] = {}
     images: dict[str, str] = {}
     for image in manifest.get("images", []):
         images[image["file_uid"]] = image["review_status"]
+        dataset_id = image.get("dataset_id")
         for annotation in image.get("annotations", []):
-            annotations[annotation["geometry_uid"]] = annotation["review_status"]
+            key = f"{dataset_id}::{annotation['geometry_uid']}"
+            annotations[key] = annotation["review_status"]
     return annotations, images
 
 
@@ -336,7 +379,13 @@ def _optional(holder: Any, name: str) -> Any:
         return None
 
 
-def _row(kind: str, key: str, status: str, holder: Any) -> dict[str, Any]:
+def _row(
+    kind: str,
+    key: str,
+    status: str,
+    holder: Any,
+    dataset_id: str | None = None,
+) -> dict[str, Any]:
     # 理由は「review_reasons フィールド → reason: タグ → 自由記述」の順に見て、
     # **機械の理由は捨てる**。manifest が初期値として流し込んだ review_required が
     # 人間の理由として書き出されるのを防ぐ（それで目視102件の理由が全部
@@ -349,6 +398,10 @@ def _row(kind: str, key: str, status: str, holder: Any) -> dict[str, Any]:
     return {
         "kind": kind,
         "key": key,
+        # annotation のみ意味を持つ（cross-dataset 重複で geometry_uid が
+        # データセットをまたいで再利用されるため、merge/lookup は dataset_id を
+        # 含めて行う）。画像側（kind="image"）は file_uid が全域一意なので None。
+        "dataset_id": dataset_id,
         "decision": status,
         "reason": join_reasons(reasons),
         "reviewer": str(holder.get_field(FIELD_REVIEWER) or ""),

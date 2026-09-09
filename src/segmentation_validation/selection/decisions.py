@@ -87,6 +87,9 @@ class HumanDecision:
     reviewer: str | None = None
     reviewed_at: str | None = None
     comment: str | None = None
+    # cross-dataset 重複で geometry_uid が複数データセットに再利用されるため、
+    # ``human`` の参照キー（annotation_uid）を組み立てるのに使う。
+    dataset_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -248,12 +251,17 @@ def build_decisions(
     # geometry_uid だけで持つと、別データセットの Issue が混ざって誤帰属する
     # ので、``f"{dataset_id}::{geometry_uid}"``（``AnnotationRecord.annotation_uid``
     # と同じ形式）を内部キーにする。``automatic`` もこの形式でキーされている前提
-    # （``selection.automatic`` 側で annotation_uid 化済み）。``human`` だけは
-    # ``review_decisions.json`` が dataset_id を持たないため bare geometry_uid の
-    # ままにする —— cross-dataset 重複の非代表側は check 自体が走らないため
-    # FiftyOne 上でも重複した geometry_uid が同時に目視対象になることはない
-    # （同じ geometry_uid で内容も食い違う Tier1 ケースだけが例外で、その場合は
-    # 両側に同じ人間の判定を適用する）。
+    # （``selection.automatic`` 側で annotation_uid 化済み）。``human`` も同じ
+    # annotation_uid でキーする（``review_decisions.json`` は dataset_id を持つ
+    # 前提。呼び出し側が annotation_uid 形式のキーで渡す）。
+    #
+    # ★以前は human だけ bare geometry_uid のままにしていた（「非代表側は
+    # 同時に目視対象にならない」という想定）。実データで、D05 の自動判定で
+    # keep 側になった annotation が、同じ geometry_uid を持つ exclude 側の
+    # annotation とは独立に S03 等で review_required になり、両方が同時に
+    # 目視対象になる実例を確認したため、この想定は成立しない。bare
+    # geometry_uid のままだと片方の人間判定がもう片方（無関係な別データセットの
+    # annotation）に誤って適用されるので、annotation_uid に厳格化した。
     detected: dict[str, list[str]] = {}
     unverified: dict[str, list[str]] = {}
     severity: dict[str, str] = {}
@@ -297,7 +305,7 @@ def build_decisions(
         uid = record.geometry_uid
         key = record.annotation_uid
         auto = automatic.get(key)
-        verdict = human.get(uid)
+        verdict = human.get(key)
         needs_review = review_flag.get(key, False)
         has_unverified = key in unverified
 

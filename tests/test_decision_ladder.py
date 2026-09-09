@@ -98,8 +98,10 @@ def test_判定不能はkeepだが未検証と記録する(config):
     assert d.detected_checks == NONE
 
 
-#: build_decisions の automatic/out_of_scope は annotation_uid
-#: （f"{dataset_id}::{geometry_uid}"）キー。human は bare geometry_uid のまま。
+#: build_decisions の automatic/out_of_scope/human はすべて annotation_uid
+#: （f"{dataset_id}::{geometry_uid}"）キー。geometry_uid は cross-dataset
+#: 重複でデータセットをまたいで再利用されるため、bare geometry_uid では
+#: 別データセットの annotation に誤って適用されてしまう。
 KEY_A = f"{DATASET}::A"
 
 
@@ -148,7 +150,7 @@ def test_自動keepでほかにissueが無ければkeep(config):
 def test_人間の判定が最優先(config):
     issues = [make_issue("S03_TINY_ANNOTATION", severity=Severity.WARNING)]
     human = {
-        "A": HumanDecision(
+        KEY_A: HumanDecision(
             geometry_uid="A",
             decision=Decision.KEEP,
             reason="true_small_lesion",
@@ -173,7 +175,7 @@ def test_人間が自動判定を覆したら監査できる(config):
         )
     }
     human = {
-        "A": HumanDecision(
+        KEY_A: HumanDecision(
             geometry_uid="A",
             decision=Decision.KEEP,
             reason="actually_different",
@@ -193,9 +195,7 @@ def test_人間が自動判定を覆したら監査できる(config):
 def test_検証対象外はout_of_scopeとして残る(config):
     """チェックを走らせていないので ``no_issue_detected`` と混ぜない。"""
     d = only(
-        build_decisions(
-            [make_record("A")], [], config, out_of_scope=frozenset({KEY_A})
-        )
+        build_decisions([make_record("A")], [], config, out_of_scope=frozenset({KEY_A}))
     )
 
     assert d.final_decision is Decision.KEEP
@@ -292,7 +292,7 @@ def test_行数が合わなければassertで落ちる(config):
 def test_human判定にreviewerが無ければassertで落ちる(config):
     """誰が判断したか追えない human 判定を通してはいけない。"""
     human = {
-        "A": HumanDecision(geometry_uid="A", decision=Decision.KEEP, reviewer=None)
+        KEY_A: HumanDecision(geometry_uid="A", decision=Decision.KEEP, reviewer=None)
     }
     records = [make_record("A")]
     decisions = build_decisions(records, [], config, human=human)
