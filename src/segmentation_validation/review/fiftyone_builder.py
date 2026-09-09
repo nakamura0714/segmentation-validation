@@ -88,6 +88,13 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
             "file_id",
             "image_class",
             "image_class_ja",
+            "series_image_index",
+            "series_image_count",
+            "auto_decision_reason",
+            "override_id",
+            "override_note",
+            "override_approved_by",
+            "override_approved_at",
         ):
             sample[key] = image[key]
 
@@ -101,10 +108,13 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
         sample["n_annotations"] = len(image["annotations"])
         # reason: タグは review_reasons の写し。絞り込みと保存ビューのために併記する
         # （正本はフィールド側。review_status と review: タグの関係と同じ）。
+        # spot_check: 未アノテーション画像のデータセット別スポットチェックで
+        # 選ばれた画像の印（採否には影響しない）。
         sample.tags = (
             list(image["auto_tags"])
             + [review_tag(image["review_status"])]
             + reason_tags(image["review_reasons"])
+            + (["spot_check"] if image["spot_check"] else [])
         )
 
         if image.get("band_path"):
@@ -477,6 +487,18 @@ def _save_views(dataset, config: Config) -> None:
             FIELD_FINAL, F(FIELD_REVIEW_REASONS).length() > 0, only_matches=True
         ),
         "理由を入れた annotation。入れ忘れの洗い出しと、理由別の見直しに使う",
+    )
+    save(
+        "11-spot-check-unannotated",
+        # pending ではない（自動決定済み）ので 1-pending-*/2-pending-* には出ない。
+        # dataset_id でまず束ね、その中で image_class → series_image_index の順に
+        # 並べると、同じ自動判定理由の画像が近くに集まって見比べやすい。
+        base.match(F("tags").contains("spot_check")).sort_by(
+            [("dataset_id", 1), ("image_class", 1), ("series_image_index", 1)]
+        ),
+        "未アノテーション画像のデータセット別スポットチェック（--sample-unannotated）。"
+        "採否は変えず、自動判定（auto_decision_reason）が妥当か確認する用途。"
+        "dataset_id/image_class/series_image_index/auto_decision_reason で絞り込める",
     )
     logger.info("保存ビュー: %s", dataset.list_saved_views())
 

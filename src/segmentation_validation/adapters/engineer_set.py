@@ -142,7 +142,17 @@ class EngineerSetAdapter:
                     shape = _shape_of(series)
                     spacing = _spacing_of(series)
                     manufacturer = series.get("manufacturer")
-                    for file_key, file_rec in series.get("file_list", {}).items():
+                    file_list = series.get("file_list", {})
+                    # series内の並び順。file_key の辞書順ソートが DICOM の
+                    # InstanceNumber 順と一致することを実データで確認済み
+                    # （core/records.py の FileGroup.series_image_index 参照）。
+                    # 元の走査順（JSON内の出現順）は他で使われている可能性があるので
+                    # 変えず、順位だけを辞書引きで求める。
+                    series_order = {
+                        key: index for index, key in enumerate(sorted(file_list))
+                    }
+                    series_image_count = len(file_list)
+                    for file_key, file_rec in file_list.items():
                         image_path = file_rec.get("image_path") or ""
                         common = {
                             "dataset_id": self.dataset_id,
@@ -166,7 +176,11 @@ class EngineerSetAdapter:
                             )
                         )
                         yield FileGroup(
-                            **common, records=records, case_labels=case_labels
+                            **common,
+                            records=records,
+                            case_labels=case_labels,
+                            series_image_index=series_order[file_key],
+                            series_image_count=series_image_count,
                         )
 
     def iter_annotations(self) -> Iterator[AnnotationRecord]:

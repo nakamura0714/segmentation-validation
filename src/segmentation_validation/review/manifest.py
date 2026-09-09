@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 from ..checks.base import Issue
 from ..config import Config
 from ..core.records import FileGroup
-from ..selection.decisions import Decision, SelectionDecision
+from ..selection.decisions import Decision, DecisionSource, SelectionDecision
 from ..selection.image_decisions import ImageDecision
 from .export_assets import AssetPaths
 from .review_schema import MACHINE_REASONS, auto_tag, effective_reasons
@@ -66,14 +66,31 @@ class ManifestImage:
     file_id: str
     image_class: str
     image_class_ja: str
+    # series内でのこのファイルの位置（0始まり）と series 内の総ファイル数。
+    # UNANNOTATED_VIEW / UNANNOTATED_ORPHAN を「series内の何枚目か」まで区別するため。
+    series_image_index: int = 0
+    series_image_count: int = 1
+    # 機械の自動判定理由（例: unannotated_orphan_unused / negative_case）。
+    # 人間の理由（review_reasons/review_reason）とは別軸で、
+    # decision_source が DEFAULT/OVERRIDE のときだけ入る（HUMAN なら空）。
+    # override後もここは変えない —— 監査用に「元々なぜexclude/keepだったか」を残す。
+    auto_decision_reason: str = ""
+    # データ管理者承認による一括 exclude→keep（override）の監査情報。
+    override_id: str = ""
+    override_note: str = ""
+    override_approved_by: str = ""
+    override_approved_at: str = ""
     # 画像単位の採否（未アノテーションのビューはここでしか判定できない）
-    review_status: str
-    review_reason: str
+    review_status: str = Decision.KEEP.value
+    review_reason: str = ""
     review_reasons: list[str] = field(default_factory=list)
     reviewer: str = ""
     reviewed_at: str = ""
     auto_tags: list[str] = field(default_factory=list)
     annotations: list[ManifestAnnotation] = field(default_factory=list)
+    # 未アノテーション画像のデータセット別スポットチェック（select_spot_check_groups）
+    # で選ばれた画像か。採否には影響しない、目視の便宜のためだけの印。
+    spot_check: bool = False
 
 
 def build_manifest(
@@ -83,10 +100,16 @@ def build_manifest(
     image_decisions: Sequence[ImageDecision],
     issues: Sequence[Issue],
     config: Config,
+    spot_check_file_uids: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """アセットが書き出せた画像だけを載せた manifest を作る。"""
+    """アセットが書き出せた画像だけを載せた manifest を作る。
+
+    ``spot_check_file_uids`` は ``select_spot_check_groups`` で選ばれた画像の
+    ``file_uid`` 集合（未アノテーション画像のデータセット別スポットチェック用）。
+    """
     by_uid = {d.geometry_uid: d for d in decisions}
     by_file = {d.file_uid: d for d in image_decisions}
+    spot_check_file_uids = spot_check_file_uids or frozenset()
 
     issues_by_uid: dict[str, list[Issue]] = {}
     issues_by_file: dict[str, list[Issue]] = {}
@@ -161,6 +184,17 @@ def build_manifest(
                 file_id=group.file,
                 image_class=image_decision.image_class if image_decision else "",
                 image_class_ja=image_decision.image_class_ja if image_decision else "",
+                series_image_index=group.series_image_index,
+                series_image_count=group.series_image_count,
+                auto_decision_reason=_auto_decision_reason(image_decision),
+                override_id=_override_field(image_decision, "override_id"),
+                override_note=_override_field(image_decision, "override_note"),
+                override_approved_by=_override_field(
+                    image_decision, "override_approved_by"
+                ),
+                override_approved_at=_override_field(
+                    image_decision, "override_approved_at"
+                ),
                 review_status=(
                     image_decision.final_decision.value
                     if image_decision
@@ -176,6 +210,7 @@ def build_manifest(
                     {auto_tag(i.check_id) for i in file_issues if _is_auto_worthy(i)}
                 ),
                 annotations=annotations,
+                spot_check=group.file_uid in spot_check_file_uids,
             )
         )
 
@@ -242,6 +277,29 @@ def _human_reasons(decision: Any) -> list[str]:
     if decision is None:
         return []
     return effective_reasons(decision.reason)
+
+
+def _auto_decision_reason(decision: Any) -> str:
+    """機械の自動判定理由だけを取り出す（例: unannotated_orphan_unused）。
+
+    ``decision.reason`` は機械・人間・overrideのどれで決まった行でも同じ1列を
+    共有しているので、``decision_source`` が ``DEFAULT``（機械の自動判定）か
+    ``OVERRIDE``（データ管理者承認による一括exclude→keep。reasonは元の自動判定理由の
+    ままにしてある）のときだけ返す。``HUMAN`` なら人間の理由なので空にする。
+    """
+    if decision is None:
+        return ""
+    source = getattr(decision, "decision_source", None)
+    if source in (DecisionSource.DEFAULT, DecisionSource.OVERRIDE):
+        return decision.reason or ""
+    return ""
+
+
+def _override_field(decision: Any, field_name: str) -> str:
+    """override監査フィールド（``override_id`` 等）を空文字許容で取り出す。"""
+    if decision is None:
+        return ""
+    return getattr(decision, field_name, None) or ""
 
 
 def _human_note(decision: Any) -> str:

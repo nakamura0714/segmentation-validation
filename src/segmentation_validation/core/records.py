@@ -148,6 +148,13 @@ class FileGroup:
     # これでしか判別できない。実測では未アノテーション187 study の全てが
     # ``No Findings/001 normal`` を持っており、意図的な陰性症例だった。
     case_labels: tuple[Label, ...] = ()
+    # 同一 series 内でのこのファイルの位置（0始まり）と series 内の総ファイル数。
+    # ``file_key`` の辞書順ソートで決める（adapters/engineer_set.py参照）。
+    # 実データで全39件の複数ファイルseriesにおいて DICOM の InstanceNumber の
+    # 順序と完全一致することを確認済み。``UNANNOTATED_VIEW``（同じseries内の
+    # 他ビューはアノテーション済み）が「series内の何枚目か」を区別するために使う。
+    series_image_index: int = 0
+    series_image_count: int = 1
 
     @property
     def file_uid(self) -> str:

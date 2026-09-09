@@ -12,6 +12,7 @@ FiftyOne は DICOM を表示できないので、8bit の PNG へ変換する必
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -19,6 +20,7 @@ from typing import Any, Iterable, Sequence
 import numpy as np
 from PIL import Image
 
+from ..checks.base import ImageClass
 from ..config import Config
 from ..core.cpu import limit_native_threads
 from ..core.imageio import MaskReadError, load_binary_mask, load_dicom_image
@@ -26,6 +28,7 @@ from ..core.progress import Progress
 from ..core.records import AnnotationRecord, FileGroup
 from ..datasets.pi6 import outside_body as pi6_outside_body
 from ..datasets.pi6.references import load_references
+from ..selection.image_decisions import ImageDecision
 
 logger = logging.getLogger(__name__)
 
@@ -141,26 +144,41 @@ def export_assets(
     out_dir: Path,
     reference_paths: dict[str, Any] | None = None,
     force: bool = False,
+    jobs: int = 1,
 ) -> dict[str, AssetPaths]:
-    """必要な画像を書き出す。DICOM の全画素を読むので時間がかかる。"""
+    """必要な画像を書き出す。DICOM の全画素を読むので時間がかかる。
+
+    ``jobs`` はスレッド並列数（``scan --jobs`` と同じパターン）。DICOMの
+    フル画素読みはNFS I/O待ちが支配的でPIL/OpenCV/NumPyがGILを解放するため、
+    逐次実行だった従来（``jobs=1``）よりスレッド並列化が素直に効く。
+    ``export_group`` は1つの ``FileGroup`` だけを見る純粋な関数で、
+    書き込み先ファイルパスも group ごとに独立しているため競合しない。
+    """
     for name in (IMAGES_DIR, MASKS_DIR, ORIGINALS_DIR, BANDS_DIR):
         (out_dir / name).mkdir(parents=True, exist_ok=True)
-    # 側方バンドの生成で OpenCV を使う。共有サーバーなので内部スレッドを絞る。
-    limit_native_threads()
+    # 側方バンドの生成やDICOMデコードで OpenCV を使う。共有サーバーなので
+    # 内部スレッドと jobs の掛け算にならないよう絞る（core/cpu.py 参照）。
+    limit_native_threads(jobs)
 
     logger.info(
-        "アセットを書き出す: %d 画像 -> %s（DICOMの全画素を読むので1枚1〜3秒）",
+        "アセットを書き出す: %d 画像 -> %s"
+        "（DICOMの全画素を読むので1枚1〜3秒、jobs=%d）",
         len(groups),
         out_dir,
+        jobs,
     )
     progress = Progress(len(groups), label="書き出し", every=25)
     resolvers = reference_paths or {}
     results: dict[str, AssetPaths] = {}
-    for group in groups:
-        results[group.file_uid] = export_group(
-            group, config, out_dir, resolvers.get(group.dataset_id), force
-        )
-        progress.advance()
+
+    def work(group: FileGroup) -> AssetPaths:
+        reference = resolvers.get(group.dataset_id)
+        return export_group(group, config, out_dir, reference, force)
+
+    with ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool:
+        for group, result in zip(groups, pool.map(work, groups)):
+            results[group.file_uid] = result
+            progress.advance()
     progress.finish()
 
     failed = [r for r in results.values() if r.error]
@@ -300,4 +318,48 @@ def select_review_groups(
             continue
         if any(r.geometry_uid in annotation_uids for r in group.records):
             selected.append(group)
+    return selected
+
+
+#: スポットチェックの対象になる画像分類（＝ annotation を持たない画像）。
+#: ``ANNOTATED`` は対象外（annotation側で個別に採否・目視するため）。
+SPOT_CHECK_IMAGE_CLASSES = frozenset(
+    {
+        ImageClass.NEGATIVE_CASE.value,
+        ImageClass.UNANNOTATED_VIEW.value,
+        ImageClass.UNANNOTATED_ORPHAN.value,
+    }
+)
+
+
+def select_spot_check_groups(
+    groups: Iterable[FileGroup],
+    image_decisions: Sequence[ImageDecision],
+    per_bucket: int,
+) -> list[FileGroup]:
+    """未アノテーション画像を ``(dataset_id, image_class, series_image_index)``
+    ごとに最大 ``per_bucket`` 件、決定的にサンプルする。
+
+    未アノテーション画像は自動で keep/exclude が決まり（``image_decisions.py``）
+    pending にはならないため、既定の ``select_review_groups`` では一切書き出されない。
+    ここでの選定は**採否を一切変えない**——あくまで自動判定が妥当かをデータセット
+    単位で目視確認するためだけの、追加のサンプル抽出。
+
+    バケット内は ``file_uid`` でソートしてから先頭N件を取る。乱数にすると
+    再実行のたびに違う画像が選ばれ、「既存アセットをスキップ」の恩恵も薄れるため
+    決定的にしてある。
+    """
+    by_file_uid = {d.file_uid: d for d in image_decisions}
+    buckets: dict[tuple[str, str, int], list[FileGroup]] = {}
+    for group in groups:
+        decision = by_file_uid.get(group.file_uid)
+        if decision is None or decision.image_class not in SPOT_CHECK_IMAGE_CLASSES:
+            continue
+        key = (group.dataset_id, decision.image_class, group.series_image_index)
+        buckets.setdefault(key, []).append(group)
+
+    selected: list[FileGroup] = []
+    for members in buckets.values():
+        members.sort(key=lambda g: g.file_uid)
+        selected.extend(members[:per_bucket])
     return selected

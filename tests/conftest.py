@@ -151,14 +151,23 @@ def make_mask_measurement(
 def make_group(
     records: tuple[AnnotationRecord, ...] = (),
     *,
+    dataset_id: str = DATASET,
     file: str = FILE,
     series: str = SERIES,
     study: str = STUDY,
     case_labels: tuple[Label, ...] = (),
+    series_image_index: int = 0,
+    series_image_count: int = 1,
 ) -> FileGroup:
-    """画像1枚。annotation を持たない画像も作れる（正常例 / 未アノテーション）。"""
+    """画像1枚。annotation を持たない画像も作れる（正常例 / 未アノテーション）。
+
+    ``dataset_id`` を変えられるのは exclude→keep の一括override（データセット単位で
+    絞り込む）のテスト用。``series_image_index``/``series_image_count`` は
+    「series内の複数ファイルのうち何枚目か」のテスト用（実データでは39件のみだが
+    UNANNOTATED_VIEW をこの位置まで区別する）。
+    """
     return FileGroup(
-        dataset_id=DATASET,
+        dataset_id=dataset_id,
         source_json=SOURCE,
         institution=INSTITUTION,
         study=study,
@@ -173,6 +182,8 @@ def make_group(
         manufacturer="SYNTH",
         records=records,
         case_labels=case_labels,
+        series_image_index=series_image_index,
+        series_image_count=series_image_count,
     )
 
 

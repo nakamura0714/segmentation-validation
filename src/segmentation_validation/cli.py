@@ -43,6 +43,7 @@ from .selection.decisions import summarize as summarize_decisions
 from .selection.image_decisions import (
     assert_image_invariants,
     build_image_decisions,
+    load_image_decision_overrides,
     summarize_images,
 )
 
@@ -158,6 +159,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--discard-unexported",
         action="store_true",
         help="review export していない人間の判定を捨てて作り直す（既定は停止する）",
+    )
+    rbuild.add_argument(
+        "--jobs",
+        type=int,
+        default=8,
+        help="アセット書き出しの並列数（scan --jobs と同じ既定値）",
+    )
+    rbuild.add_argument(
+        "--sample-unannotated",
+        type=int,
+        default=None,
+        help="未アノテーション画像を (dataset_id, image_class, series_image_index) "
+        "ごとにN件サンプルしてFiftyOneに含める（採否は変えない。目視での妥当性確認用）",
     )
     rsub.add_parser("launch", help="App を localhost で起動する")
     rsub.add_parser("status", help="目視の進捗を表示する")
@@ -425,8 +439,16 @@ def _select(config: Config, args: argparse.Namespace) -> int:
 
     # 画像単位の採否。annotation を持たない画像（正常例187 / 未アノテーション33）は
     # selection_decisions に行を持てないので、別ファイルで採否を明示する。
+    # データ管理者が承認した一括ルール（無ければ空で何も変わらない）を読み込む。
+    overrides = load_image_decision_overrides(config.image_decision_overrides_path)
+    if overrides:
+        logger.info(
+            "exclude→keep の一括ルールを読み込んだ: %d 件 (%s)",
+            len(overrides),
+            config.image_decision_overrides_path,
+        )
     image_decisions = build_image_decisions(
-        context.groups, issues, config, human_images
+        context.groups, issues, config, human_images, overrides
     )
     assert_image_invariants(image_decisions, list(context.groups))
 
@@ -765,7 +787,11 @@ def _check_unexported(config: Config, args: argparse.Namespace) -> bool:
 
 
 def _review_build(config: Config, args: argparse.Namespace) -> int:
-    from .review.export_assets import export_assets, select_review_groups
+    from .review.export_assets import (
+        export_assets,
+        select_review_groups,
+        select_spot_check_groups,
+    )
     from .review.manifest import build_manifest, write_manifest
 
     context = _load_context(config)
@@ -821,12 +847,38 @@ def _review_build(config: Config, args: argparse.Namespace) -> int:
             len(groups),
         )
 
+    # 未アノテーション画像のデータセット別スポットチェック。採否は変えず、
+    # 自動判定（image_decisions.py）が妥当かの確認用に追加でサンプルする。
+    spot_check_file_uids: frozenset[str] = frozenset()
+    if args.sample_unannotated is not None:
+        spot_check_groups = select_spot_check_groups(
+            context.groups, image_decisions, args.sample_unannotated
+        )
+        existing_uids = {g.file_uid for g in groups}
+        added = [g for g in spot_check_groups if g.file_uid not in existing_uids]
+        groups = list(groups) + added
+        spot_check_file_uids = frozenset(g.file_uid for g in spot_check_groups)
+        logger.info(
+            "スポットチェック: 未アノテーション画像 %d 枚を追加"
+            "（bucketあたり最大 %d 件）",
+            len(added),
+            args.sample_unannotated,
+        )
+
     adapters = {a.dataset_id: a.reference_mask_path for a in open_adapters(config)}
     review_dir = _review_dir(config)
-    assets = export_assets(groups, config, review_dir, adapters, force=args.force)
+    assets = export_assets(
+        groups, config, review_dir, adapters, force=args.force, jobs=args.jobs
+    )
 
     manifest = build_manifest(
-        groups, assets, decisions, image_decisions, issues, config
+        groups,
+        assets,
+        decisions,
+        image_decisions,
+        issues,
+        config,
+        spot_check_file_uids=spot_check_file_uids,
     )
     write_manifest(review_dir / "review_manifest.json", manifest)
     logger.info(

@@ -17,8 +17,11 @@ annotation 単位の不変条件（1817行）を壊さずに、画像の採否�
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..checks.base import IMAGE_CLASS_JA, ImageClass, Issue, classify_image
@@ -31,6 +34,8 @@ from .decisions import (
     ReviewStatus,
     effective_review_required,
 )
+
+logger = logging.getLogger(__name__)
 
 NONE = "none"
 
@@ -75,6 +80,21 @@ class ImageDecision:
     reviewer: str | None = None
     reviewed_at: str | None = None
     comment: str | None = None
+    # データ管理者承認による一括 exclude→keep（override）の監査情報。
+    # override が無ければ全て None。``reason`` はoverride適用後も一切変更しない
+    # ―― 「元々なぜexclude/keepだったか」を常に辿れるようにするため。
+    override_id: str | None = None
+    override_note: str | None = None
+    override_approved_by: str | None = None
+    override_approved_at: str | None = None
+    # series内でのこのファイルの位置（0始まり）と series 内の総ファイル数。
+    # UNANNOTATED_VIEW / UNANNOTATED_ORPHAN の区別だけでなく「series内の何枚目か」
+    # まで条件指定できるようにするため（FileGroup.series_image_index と同じ値）。
+    # 既定値を持たせてあるのは、この変更より前に書かれた image_decisions.json
+    # （``series_image_index`` キーを持たない）を ``ImageDecision(**data)`` で
+    # 読み戻しても壊れないようにするため（cli.py の ``_read_image_decisions``）。
+    series_image_index: int = 0
+    series_image_count: int = 1
 
 
 COLUMNS: tuple[str, ...] = tuple(
@@ -91,6 +111,8 @@ COLUMNS: tuple[str, ...] = tuple(
         "image_path",
         "image_class",
         "image_class_ja",
+        "series_image_index",
+        "series_image_count",
         "n_annotations",
         "case_labels",
         "detected_checks",
@@ -102,8 +124,103 @@ COLUMNS: tuple[str, ...] = tuple(
         "reviewer",
         "reviewed_at",
         "comment",
+        "override_id",
+        "override_note",
+        "override_approved_by",
+        "override_approved_at",
     )
 )
+
+
+@dataclass(frozen=True)
+class ImageDecisionOverride:
+    """データ管理者が承認した「条件付き exclude→keep」の1規則。
+
+    ``review_policy/image_decision_overrides.json`` から読む。
+    **機械の自動判定（``DecisionSource.DEFAULT``）にしか適用しない**——
+    人間が明示的に exclude と判断したものを条件一致だけで黙って
+    上書きしないための安全側ガードは ``build_image_decisions`` 側で行う。
+    """
+
+    id: str
+    # キーは "dataset_id" / "auto_decision_reason" / "image_class" /
+    # "series_image_index"。値が None のキーはワイルドカード（絞り込まない）。
+    # 値はリストで、含まれていれば一致（OR）。複数キーはAND条件。
+    match: Mapping[str, tuple[Any, ...] | None]
+    action: str
+    approved_by: str
+    approved_at: str
+    note: str = ""
+
+    def matches(
+        self, *, dataset_id: str, reason: str, image_class: str, series_image_index: int
+    ) -> bool:
+        candidates: dict[str, Any] = {
+            "dataset_id": dataset_id,
+            "auto_decision_reason": reason,
+            "image_class": image_class,
+            "series_image_index": series_image_index,
+        }
+        for key, allowed in self.match.items():
+            if allowed is None:
+                continue
+            if candidates.get(key) not in allowed:
+                return False
+        return True
+
+
+def load_image_decision_overrides(path: Path) -> list[ImageDecisionOverride]:
+    """承認済みの一括ルールを読む。ファイルが無ければ空（何も上書きしない）。"""
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        logger.error("%s を読めない。overrideは適用しない: %s", path, error)
+        return []
+
+    overrides: list[ImageDecisionOverride] = []
+    for raw in payload.get("overrides", []):
+        match: dict[str, tuple[Any, ...] | None] = {}
+        for key, value in (raw.get("match") or {}).items():
+            if value is None:
+                match[key] = None
+            elif isinstance(value, list):
+                match[key] = tuple(value)
+            else:
+                match[key] = (value,)
+        overrides.append(
+            ImageDecisionOverride(
+                id=raw["id"],
+                match=match,
+                action=raw.get("action", "keep"),
+                approved_by=raw.get("approved_by", ""),
+                approved_at=raw.get("approved_at", ""),
+                note=raw.get("note", ""),
+            )
+        )
+    return overrides
+
+
+def _find_matching_override(
+    overrides: Sequence[ImageDecisionOverride],
+    *,
+    dataset_id: str,
+    reason: str,
+    image_class: str,
+    series_image_index: int,
+) -> ImageDecisionOverride | None:
+    for override in overrides:
+        if override.action != "keep":
+            continue
+        if override.matches(
+            dataset_id=dataset_id,
+            reason=reason,
+            image_class=image_class,
+            series_image_index=series_image_index,
+        ):
+            return override
+    return None
 
 
 def build_image_decisions(
@@ -111,6 +228,7 @@ def build_image_decisions(
     issues: Iterable[Issue],
     config: Config,
     human: Mapping[str, HumanDecision] | None = None,
+    overrides: Sequence[ImageDecisionOverride] | None = None,
 ) -> list[ImageDecision]:
     """全画像の採否を決める。**1画像 = 1行**、全画像が必ず1行持つ。
 
@@ -123,8 +241,13 @@ def build_image_decisions(
     4. 目視対象の画像レベル Issue がある → pending
     5. 正常例 → keep（陰性サンプル）
     6. それ以外 → keep（目視に回さない設定のもの）
+
+    上記で決まった結果が**機械の自動exclude（3番、``DecisionSource.DEFAULT``）**の
+    ときだけ、``overrides``（データ管理者が承認した一括ルール）に一致すれば
+    ``keep`` へ引き上げる。人間判定（1番）には絶対に適用しない。
     """
     human = human or {}
+    overrides = overrides or []
     annotated_series = {(g.dataset_id, g.study, g.series) for g in groups if g.records}
     review_classes = frozenset(config.decision_policy.review_image_classes)
 
@@ -172,6 +295,26 @@ def build_image_decisions(
             reason = ImageReason.KEPT_WITHOUT_REVIEW.value
             source, status = DecisionSource.DEFAULT, ReviewStatus.NOT_NEEDED
 
+        # 承認済みの一括ルールで、機械の自動exclude（DEFAULT）だけを引き上げる。
+        # 人間判定（HUMAN）には絶対に適用しない（安全側）。
+        # ``reason`` は変更しない —— 「元々なぜexcludeだったか」を監査用に残すため。
+        override_id = override_note = override_approved_by = override_approved_at = None
+        if decision is Decision.EXCLUDE and source is DecisionSource.DEFAULT:
+            matched = _find_matching_override(
+                overrides,
+                dataset_id=group.dataset_id,
+                reason=reason,
+                image_class=image_class.value,
+                series_image_index=group.series_image_index,
+            )
+            if matched is not None:
+                decision = Decision.KEEP
+                source = DecisionSource.OVERRIDE
+                override_id = matched.id
+                override_note = matched.note
+                override_approved_by = matched.approved_by
+                override_approved_at = matched.approved_at
+
         decisions.append(
             ImageDecision(
                 dataset_id=group.dataset_id,
@@ -185,6 +328,8 @@ def build_image_decisions(
                 image_path=group.image_path,
                 image_class=image_class.value,
                 image_class_ja=IMAGE_CLASS_JA[image_class],
+                series_image_index=group.series_image_index,
+                series_image_count=group.series_image_count,
                 n_annotations=len(group.records),
                 case_labels="|".join(
                     label.qualified_code for label in group.case_labels
@@ -199,6 +344,10 @@ def build_image_decisions(
                 reviewer=verdict.reviewer if verdict else None,
                 reviewed_at=verdict.reviewed_at if verdict else None,
                 comment=verdict.comment if verdict else None,
+                override_id=override_id,
+                override_note=override_note,
+                override_approved_by=override_approved_by,
+                override_approved_at=override_approved_at,
             )
         )
     return decisions

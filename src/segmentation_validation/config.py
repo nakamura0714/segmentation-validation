@@ -285,6 +285,17 @@ class Config:
     def development_dir(self) -> Path:
         return self.output_dir / "development"
 
+    @property
+    def image_decision_overrides_path(self) -> Path:
+        """データ管理者が承認した exclude→keep 一括ルールの置き場。
+
+        ``output/validation/<fingerprint>/`` の下ではなく、fingerprintに依存しない
+        安定した場所に置く。承認内容はデータセット構成（＝fingerprint）が変わっても
+        引き継がれるべきポリシーであり、review_decisions.json のような
+        「実行のたびに変わる出力」ではないため。git管理してレビュー可能にする想定。
+        """
+        return self.project_root / "review_policy" / "image_decision_overrides.json"
+
     def resolve(self, path_like: str) -> Path:
         """設定中の相対パスをプロジェクトルート基準で解決する。
 

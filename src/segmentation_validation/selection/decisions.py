@@ -33,6 +33,9 @@ class DecisionSource(StrEnum):
     HUMAN = "human"
     # Issue が無い、または判定不能のまま残したもの。人も機械も判断していない。
     DEFAULT = "default"
+    # データ管理者が承認した条件付き一括ルール（image_decision_overrides.json）で
+    # 機械の自動判定（DEFAULT）を上書きしたもの。人間判定（HUMAN）は対象にしない。
+    OVERRIDE = "override"
     NONE = "-"
 
 
