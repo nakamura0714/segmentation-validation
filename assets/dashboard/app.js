@@ -850,6 +850,7 @@ cApply();
    にする。「dashboard.html 1枚で完結する」という約束を壊さないため。 */
 const rBox = $("#refresh"), rNote = $("#refresh-note"), rWarn = $("#refresh-warn");
 const rLog = $("#refresh-log"), rHtml = $("#refresh-html"), rFull = $("#refresh-full");
+const rFlag = $("#refresh-flag");
 let rTimer = null, rInterval = 2000;
 // 「自分が始めた更新か」の記録。他タブが始めた更新で勝手に読み直さないため。
 // sessionStorage はプライベートウィンドウ等で例外を投げることがあるので包む。
@@ -905,13 +906,17 @@ function rRender(s) {
   // 揃っていないと「面積が空のHTML」で正常な成果物を潰すので押せない。
   rHtml.disabled = running || !w.can_rebuild_html;
   rFull.disabled = running || !w.can_run_full;
+  rFlag.disabled = running || !s.allow_refresh;
   if (!rFpLoaded) rLoadFingerprints(s.pinned);
   else rSel.value = s.pinned || "auto";
 
+  const rModeLabel = { full: "フル更新", flag_report: "flag:needs_report のCSV反映" };
   if (running) {
-    rNote.textContent = `${job.mode === "full" ? "フル更新" : "HTML再構成"}中 — ${job.step}`;
+    rNote.textContent = `${rModeLabel[job.mode] || "HTML再構成"}中 — ${job.step}`;
   } else if (job && job.ok === false) {
     rNote.textContent = `更新が失敗した（${job.step}）。ログを確認する。`;
+  } else if (job && job.ok && job.mode === "flag_report" && rMine.get() === job.started_at) {
+    rNote.textContent = `flag:needs_report を flagged_for_report.csv へ反映した（${rTime(job.finished_at)}）。`;
   } else {
     rNote.textContent = `最終生成 ${rTime(s.dashboard_mtime)}`
       + (s.stale && w.can_rebuild_html
@@ -999,9 +1004,15 @@ async function rPoll() {
   } else {
     if (rTimer) { clearInterval(rTimer); rTimer = null; }
     // 成功して終わった直後だけ読み直す。失敗はログを読ませたいので留まる。
+    // flag_report は dashboard.html を作り直さないので、リロードせず
+    // rRender が出す「反映した」ノートをそのまま残す。
     if (job && job.ok && rMine.get() === job.started_at) {
-      rMine.clear();
-      location.reload();
+      if (job.mode === "flag_report") {
+        rMine.clear();
+      } else {
+        rMine.clear();
+        location.reload();
+      }
     }
   }
 }
@@ -1013,7 +1024,7 @@ async function rStart(mode) {
       + "1時間以上かかることがある**（33,000枚のDICOMを実際に読む）。\n"
       + "FiftyOne と mongod にも触るので、目視結果の取り込みに失敗することもある。\n"
       + "実行する？")) return;
-  rHtml.disabled = rFull.disabled = true;
+  rHtml.disabled = rFull.disabled = rFlag.disabled = true;
   try {
     const res = await fetch(`/api/refresh?mode=${mode}`, { method: "POST" });
     if (res.status === 409) { rNote.textContent = "更新がすでに走っている"; return; }
@@ -1032,4 +1043,5 @@ async function rStart(mode) {
 
 rHtml.addEventListener("click", () => rStart("html"));
 rFull.addEventListener("click", () => rStart("full"));
+rFlag.addEventListener("click", () => rStart("flag_report"));
 rPoll();

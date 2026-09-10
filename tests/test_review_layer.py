@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -34,6 +35,7 @@ from segmentation_validation.review.export_decisions import (
     _effective_status,
     _exported_keys,
     _is_human,
+    write_flagged_report,
 )
 from segmentation_validation.review.manifest import (
     _duplicate_hint,
@@ -195,6 +197,51 @@ def test_読めないファイルを全部export済みと解釈しない(tmp_pat
     path.write_text("{壊れている", encoding="utf-8")
 
     assert _exported_keys(path) == set()
+
+
+# --------------------------------------------------------- flag:needs_report
+
+
+def _flag_row(key: str, **overrides: str) -> dict[str, str]:
+    row = {
+        "kind": "annotation",
+        "dataset_id": DATASET_ID,
+        "key": key,
+        "institution": "synth_hospital",
+        "patient_id": "SYNTH00000001",
+        "study": "SYNTH00000001_000",
+        "series": "SYNTH00000001_000_000",
+        "file_id": "SYNTH00000001_000_000_000",
+        "image_path": "/mnt/medical2/synth/F1.dcm",
+        "path_mask": f"/synth/mask/{key}.png",
+        "path_original_mask": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_flagged_reportは同じキーを重複させない(tmp_path):
+    """ボタンを何度押しても行は増え続けるだけで、既存の行は書き換わる。"""
+    path = tmp_path / "flagged_for_report.csv"
+
+    assert write_flagged_report(path, [_flag_row("A")]) == 1
+    assert write_flagged_report(path, [_flag_row("A")]) == 0  # 同じキーは増えない
+    assert write_flagged_report(path, [_flag_row("B")]) == 1
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {r["key"] for r in rows} == {"A", "B"}
+
+
+def test_flagged_reportは実ファイルパスを持つ(tmp_path):
+    """マスクの実ファイルはコピーせず、パスだけを控える運用が前提。"""
+    path = tmp_path / "flagged_for_report.csv"
+    write_flagged_report(path, [_flag_row("A")])
+
+    with path.open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["path_mask"] == "/synth/mask/A.png"
+    assert row["image_path"] == "/mnt/medical2/synth/F1.dcm"
 
 
 # --------------------------------------------------------------- マスクの無い bbox

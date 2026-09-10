@@ -40,6 +40,8 @@ from .review_schema import (
     FIELD_REVIEW_STATUS,
     FIELD_REVIEWED_AT,
     FIELD_REVIEWER,
+    FLAG_NEEDS_REPORT,
+    SCHEMA_SEED_TAG,
     effective_reasons,
     join_reasons,
 )
@@ -294,6 +296,123 @@ def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
         for d in payload.get("image_decisions", [])
     ]
     return rows
+
+
+FLAGGED_COLUMNS = (
+    "kind",
+    "dataset_id",
+    "key",
+    "institution",
+    "patient_id",
+    "study",
+    "series",
+    "file_id",
+    "image_path",
+    "path_mask",
+    "path_original_mask",
+)
+
+
+def collect_flagged(config: Config) -> list[dict[str, Any]]:
+    """``flag:needs_report`` の付いた annotation/画像を、実ファイルパス込みで集める。
+
+    採否（``review_status``）とは別軸なので ``effective_status`` は使わず、
+    タグの有無だけで拾う。``system:schema_seed``（候補値を実在させるための
+    捨て行）は必ず除外する —— ``flag:needs_report`` は候補一覧に出すため、
+    その捨て行1件にもあらかじめ付けてある（`fiftyone_builder._seed_choice_candidates`）。
+    """
+    configure_database(config)
+    import fiftyone as fo
+    from fiftyone import ViewField as F
+
+    name = config.review.dataset_name
+    if name not in fo.list_datasets():
+        raise RuntimeError(
+            f"FiftyOne dataset '{name}' が無い。先に `review build` を実行する"
+        )
+    dataset = fo.load_dataset(name)
+    real = dataset.match(~F("tags").contains(SCHEMA_SEED_TAG))
+
+    fields = [
+        "file_uid",
+        "dataset_id",
+        "institution",
+        "patient_id",
+        "study",
+        "series",
+        "file_id",
+        "image_path",
+        "tags",
+        FIELD_FINAL,
+    ]
+    rows: list[dict[str, Any]] = []
+    for sample in real.select_fields(fields):
+        if FLAG_NEEDS_REPORT in (sample.tags or []):
+            rows.append(_flag_row("image", sample.file_uid, sample))
+        detections = sample.get_field(FIELD_FINAL)
+        for detection in detections.detections if detections else []:
+            if FLAG_NEEDS_REPORT in (detection.tags or []):
+                uid = detection.get_field("geometry_uid") or ""
+                rows.append(_flag_row("annotation", uid, sample, detection))
+    return rows
+
+
+def _flag_row(
+    kind: str, key: str, sample: Any, detection: Any | None = None
+) -> dict[str, Any]:
+    """報告用の1行。識別情報は常に Sample 側から取る（Detection には無い）。
+
+    実ファイルパス（``path_mask``/``path_original_mask``）はannotationのときだけ
+    Detection側から取る。画像単位のflagには対応するannotationが無いので空にする。
+    """
+    holder = detection if detection is not None else sample
+    return {
+        "kind": kind,
+        "dataset_id": str(sample.get_field("dataset_id") or ""),
+        "key": key,
+        "institution": str(sample.get_field("institution") or ""),
+        "patient_id": str(sample.get_field("patient_id") or ""),
+        "study": str(sample.get_field("study") or ""),
+        "series": str(sample.get_field("series") or ""),
+        "file_id": str(sample.get_field("file_id") or ""),
+        "image_path": str(sample.get_field("image_path") or ""),
+        "path_mask": str(_optional(holder, "path_mask") or ""),
+        "path_original_mask": str(_optional(holder, "path_original_mask") or ""),
+    }
+
+
+def write_flagged_report(path: Path, rows: list[dict[str, Any]]) -> int:
+    """flag:needs_report が付いた項目を CSV へ書き足す。
+
+    ``write_decisions`` と同じ理由でマージにする（キーは
+    ``(kind, dataset_id, key)``）。実ファイルはコピーせず、このCSVで
+    パスだけを控えてデータ管理担当へ報告する運用を想定している
+    （マスクの実ファイルをコピー/exportする運用は避ける）。
+    ボタンを何度押しても行は増え続けるだけで、既存の行は消えない。
+
+    戻り値は今回**新規に追加**された行数（呼び出し側が「今回何件増えたか」を
+    出すため）。
+    """
+    existing: dict[tuple[str, str, str], dict[str, Any]] = {}
+    if path.exists():
+        with path.open(encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                existing[(row["kind"], row["dataset_id"], row["key"])] = row
+
+    added = 0
+    for row in rows:
+        key = (row["kind"], row["dataset_id"], row["key"])
+        if key not in existing:
+            added += 1
+        existing[key] = row
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FLAGGED_COLUMNS)
+        writer.writeheader()
+        for row in existing.values():
+            writer.writerow(row)
+    return added
 
 
 # ------------------------------------------------------------------ internal

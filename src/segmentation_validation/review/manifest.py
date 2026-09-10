@@ -64,6 +64,9 @@ class ManifestImage:
     study: str
     series: str
     file_id: str
+    # 表示用の filepath とは別。flag:needs_report の報告に使う実ファイルパス
+    # （AnnotationRecord.path_mask/path_original_mask と同じ考え方）。
+    image_path: str
     image_class: str
     image_class_ja: str
     # series内でのこのファイルの位置（0始まり）と series 内の総ファイル数。
@@ -188,6 +191,7 @@ def build_manifest(
                 study=group.study,
                 series=group.series,
                 file_id=group.file,
+                image_path=str(group.resolved_image_path),
                 image_class=image_decision.image_class if image_decision else "",
                 image_class_ja=image_decision.image_class_ja if image_decision else "",
                 series_image_index=group.series_image_index,
@@ -414,6 +418,10 @@ def _attributes(record: Any, decision: SelectionDecision | None) -> dict[str, An
         "timestamp": record.timestamp or "",
         "is_latest": record.is_latest,
         "version": record.version,
+        # flag:needs_report で報告するとき、実ファイルをコピーせず
+        # このパスをそのまま報告先に伝える運用にするための識別情報。
+        "path_mask": str(record.resolved_path_mask or ""),
+        "path_original_mask": str(record.resolved_path_original_mask or ""),
     }
     if record.labels:
         label = record.labels[0]

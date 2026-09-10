@@ -125,9 +125,23 @@ D03/D04（近似重複・包含重複）のannotationには`newer_in_pair`属性
 
 このツールの検証対象は既定で気胸のみ（`validation.target_labels`）。対象外の
 annotationで明らかにおかしいものを偶然見つけた場合は、`flag:needs_report`タグを
-付けておく（タグ入力欄の候補に出る）。後で保存ビュー`7-flagged-for-report`を開けば
-まとめて拾えるので、`institution`/`patient_id`/`file_id`等の属性と一緒に
-データ管理担当へ報告する。
+付けておく（タグ入力欄の候補に出る）。**このタグにはexport経路が無く、
+`review build`で消える**ので、放置せずCSVへ反映しておく。
+
+```bash
+uv run segmentation-validation review flag-report
+```
+
+`flag:needs_report`が付いたannotation/画像を、識別情報
+（`institution`/`patient_id`/`study`/`series`/`file_id`/`dataset_id`）と
+実ファイルパス（`path_mask`/`path_original_mask`/`image_path`。`/mnt`・
+`/mnt/medicaldb`基準）付きで`output/validation/<fingerprint>/flagged_for_report.csv`
+へ書き足す。**マスクの実ファイルはコピーせず、このパスをそのままデータ管理担当へ
+伝える。** 何度実行しても行は増え続けるだけで、既存の行は消えない（キーは
+`dataset_id`+`geometry_uid`/`file_uid`）ので、目視のたびに気軽に実行してよい。
+
+`serve`（4章）で開いているダッシュボードからは、更新パネルの
+「flag:needs_report をCSVへ反映」ボタンでも同じことができる。
 
 **`reason:` と `flag:` は別の軸。** `reason:`は「なぜその採否にしたか」（`review_reasons`
 の写し）、`flag:`は「データ管理担当に報告したい」という印。前者は採否の記録として
@@ -230,6 +244,8 @@ ssh -L 8899:localhost:8899 <本サーバー>
   `select`を自分で回した場合は、ページを再読み込みするだけで作り直される。
   `scan`と`check`が入っているので、**データセット構成を変えた直後でも
   ボタンだけで一周できる**（ただし新しい構成の`scan`は1時間以上かかりうる）。
+  もう1つ「flag:needs_report をCSVへ反映」ボタンがあり、これは
+  dashboard.htmlを作り直さず`review flag-report`（2.4節）だけを走らせる。
 - **表示する fingerprint を選べる。** 更新パネルの「表示」に、
   データセット本数・最終更新・目視判定の件数つきで一覧が出る。
   **現在の設定と別のものを選ぶと読み取り専用になり、更新ボタンは押せない**

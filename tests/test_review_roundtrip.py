@@ -304,6 +304,44 @@ def test_importしてもautoタグは残る(built, review_config, synthetic, tmp
     assert "review:exclude" in tags
 
 
+# --------------------------------------------------------------- flag:needs_report
+
+
+def test_flagが付いたものだけ実ファイルパスつきで集まる(
+    built, synthetic, review_config
+):
+    """review_status とは無関係の別軸。付けたものだけ拾い、候補シードは混ざらない。"""
+    from segmentation_validation.review.export_decisions import collect_flagged
+    from segmentation_validation.review.review_schema import FLAG_NEEDS_REPORT
+
+    f2_file_uid = synthetic["images"][1]["file_uid"]
+    for sample in built:
+        dets = sample["final"]
+        for det in dets.detections if dets else []:
+            if det["geometry_uid"] == "B":
+                det.tags = list(det.tags) + [FLAG_NEEDS_REPORT]
+                sample["final"] = dets
+        if sample["file_id"] == "F2":
+            sample.tags = list(sample.tags) + [FLAG_NEEDS_REPORT]
+        sample.save()
+
+    rows = collect_flagged(review_config)
+    by_key = {(r["kind"], r["key"]): r for r in rows}
+
+    # ★候補値を実在させるための捨て行にも flag:needs_report が付けてある
+    # （fiftyone_builder._seed_choice_candidates）。混ざっていないこと。
+    assert set(by_key) == {("annotation", "B"), ("image", f2_file_uid)}
+
+    ann = by_key[("annotation", "B")]
+    assert ann["dataset_id"] == "SYNTH"
+    assert ann["path_mask"] == "/synth/mask/B.png"
+    assert ann["institution"] == "synth_hospital"
+
+    img = by_key[("image", f2_file_uid)]
+    assert img["path_mask"] == ""  # annotationではないので実ファイルは無い
+    assert img["institution"] == "synth_hospital"
+
+
 # --------------------------------------------------------------- ゲート
 
 

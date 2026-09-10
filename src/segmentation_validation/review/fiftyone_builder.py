@@ -86,6 +86,7 @@ def build_dataset(manifest: dict[str, Any], config: Config, overwrite: bool = Tr
             "study",
             "series",
             "file_id",
+            "image_path",
             "image_class",
             "image_class_ja",
             "series_image_index",
@@ -246,6 +247,10 @@ PANEL_ATTRIBUTES: tuple[tuple[str, bool], ...] = (
     # 検証結果との突き合わせキーと、何が検出されたか。
     ("geometry_uid", True),
     ("issues", True),
+    # flag:needs_report で報告するときの識別情報。実ファイルはコピーせず
+    # このパスを報告先に伝える運用にするため、コピー元として表示する。
+    ("path_mask", True),
+    ("path_original_mask", True),
     # flag:needs_report を付けるために編集可能にしておく。
     ("tags", False),
 )

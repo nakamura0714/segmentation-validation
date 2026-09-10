@@ -190,6 +190,10 @@ def build_parser() -> argparse.ArgumentParser:
     rsub.add_parser("launch", help="App を localhost で起動する")
     rsub.add_parser("status", help="目視の進捗を表示する")
     rsub.add_parser("export", help="判定を review_decisions.json へ書き出す")
+    rsub.add_parser(
+        "flag-report",
+        help="flag:needs_reportの付いた項目をflagged_for_report.csvへ書き出す",
+    )
     rsub.add_parser("precision", help="自動ルールの Precision を集計する")
     rimport = rsub.add_parser("import", help="review_decisions.json を FiftyOne へ戻す")
     rimport.add_argument("--path", type=Path, default=None, help="読み込むJSON")
@@ -843,6 +847,7 @@ def _review(config: Config, args: argparse.Namespace) -> int:
         "launch": _review_launch,
         "status": _review_status,
         "export": _review_export,
+        "flag-report": _review_flag_report,
         "precision": _review_precision,
         "import": _review_import,
     }
@@ -1156,6 +1161,38 @@ def _review_export(config: Config, args: argparse.Namespace) -> int:
         target,
     )
     logger.info("次: `segmentation-validation select` で採否へ反映する")
+    return EXIT_OK
+
+
+def _review_flag_report(config: Config, args: argparse.Namespace) -> int:
+    """flag:needs_report の付いた項目を flagged_for_report.csv へ書き出す。
+
+    採否とは無関係のレポート専用の出力で、``review_decisions.json`` とは
+    別ファイル。マスクの実ファイルはコピーせず、パス（path_mask/
+    path_original_mask）だけをこのCSVに書き足していく運用にするため、
+    出力先を fingerprint 直下（review/ の外）に置く。
+    """
+    try:
+        from .review.export_decisions import collect_flagged, write_flagged_report
+    except ImportError:
+        logger.error("fiftyone が無い。`uv sync --group review` を実行する")
+        return EXIT_FAILURE
+
+    try:
+        rows = collect_flagged(config)
+    except RuntimeError as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
+
+    target = config.validation_dir / _fingerprint(config) / "flagged_for_report.csv"
+    added = write_flagged_report(target, rows)
+    logger.info(
+        "flag:needs_report: annotation %d / 画像 %d（今回新規 %d 件）-> %s",
+        sum(1 for r in rows if r["kind"] == "annotation"),
+        sum(1 for r in rows if r["kind"] == "image"),
+        added,
+        target,
+    )
     return EXIT_OK
 
 

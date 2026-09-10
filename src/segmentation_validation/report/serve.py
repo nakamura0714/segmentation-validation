@@ -90,6 +90,7 @@ SERVABLE = {
     "image_decisions.json",
     "summary.md",
     "precision.md",
+    "flagged_for_report.csv",
 }
 
 #: UIに出すログの行数。フル更新は数百行出るので末尾だけ持つ。
@@ -383,8 +384,10 @@ class DashboardServer:
         try:
             if job.mode == "html":
                 self._run_html(job)
-            else:
+            elif job.mode == "full":
                 self._run_full(job)
+            else:
+                self._run_flag_report(job)
         except Exception as error:  # サーバーを落とさない。UIへ出して終わる
             logger.exception("更新ジョブが失敗した")
             job.say(f"失敗: {error}")
@@ -436,6 +439,25 @@ class DashboardServer:
                 if code:
                     job.say(f"（`{name}` は exit {code}。想定内なので続ける）")
         job.ok = True
+
+    def _run_flag_report(self, job: Job) -> None:
+        """flag:needs_report の付いた項目を flagged_for_report.csv へ書き出す。
+
+        fiftyone を import するので ``_run_full`` と同じ理由でサブプロセスにする。
+        dashboard.html には触らないので ``ensure_fresh``/``is_stale`` の対象外。
+        """
+        set_args: list[str] = []
+        for override in self.overrides:
+            set_args += ["--set", override]
+        step = ("review", "flag-report")
+        job.step = " ".join(step)
+        with self.log_path.open("a", encoding="utf-8") as log:
+            log.write(f"\n===== flag-report {job.started_at} =====\n")
+            job.say(f"$ segmentation-validation {' '.join(set_args + list(step))}")
+            log.write(f"--- {' '.join(step)} ---\n")
+            log.flush()
+            code = self._run_step(step, set_args, job, log)
+        job.ok = code == 0
 
     def _step_options(self, step: tuple[str, ...]) -> list[str]:
         """段ごとの追加引数。設定から取れるものはここで足す。"""
@@ -706,23 +728,29 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
 
         mode = params.get("mode", ["html"])[0]
-        if mode not in ("html", "full"):
-            self._send_text(400, f"mode は html か full: {mode!r}")
+        if mode not in ("html", "full", "flag_report"):
+            self._send_text(400, f"mode は html/full/flag_report のいずれか: {mode!r}")
             return
 
-        # ★更新してよい状態かを先に見る。別構成を見ている状態で走らせると、
-        # 混成HTMLを作るか（html）、表示と関係ない出力先に書くか（full）になる。
-        writable = self.dashboard.writability()
-        allowed = writable.can_rebuild_html if mode == "html" else writable.can_run_full
-        if not allowed:
-            self._send_json(
-                409,
-                {
-                    "error": "いまは更新できない",
-                    "blockers": list(writable.blockers),
-                },
+        # flag_report は dashboard.html を作り直さない（現在の config の
+        # FiftyOne dataset から flag:needs_report を拾って CSV に足すだけ）ので、
+        # 「表示中と別構成なら止める」writability の対象外にする。
+        if mode != "flag_report":
+            # ★更新してよい状態かを先に見る。別構成を見ている状態で走らせると、
+            # 混成HTMLを作るか（html）、表示と関係ない出力先に書くか（full）になる。
+            writable = self.dashboard.writability()
+            allowed = (
+                writable.can_rebuild_html if mode == "html" else writable.can_run_full
             )
-            return
+            if not allowed:
+                self._send_json(
+                    409,
+                    {
+                        "error": "いまは更新できない",
+                        "blockers": list(writable.blockers),
+                    },
+                )
+                return
 
         if not self.dashboard.start_job(mode):
             self._send_json(409, {"error": "更新がすでに走っている"})
