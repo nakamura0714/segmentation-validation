@@ -558,6 +558,17 @@ def _select(config: Config, args: argparse.Namespace) -> int:
     )
     assert_image_invariants(image_decisions, list(context.groups))
 
+    # 前回の select 結果（上書きする前に読む）。「今回のセッションで何件
+    # 判定が進んだか」は reviewer/reviewed_at が運用上ずっと空なので
+    # review_decisions.json からは追えない。前回との pending 差分だけが
+    # 確実に取れる進捗指標なので、ここで比較用に読んでおく。
+    previous_decisions = _read_selection(out_dir / "selection_decisions.json")
+    previous_summary = summarize_decisions(previous_decisions) if previous_decisions else None
+    previous_image_decisions = _read_image_decisions(out_dir / "image_decisions.json")
+    previous_images = (
+        summarize_images(previous_image_decisions) if previous_image_decisions else None
+    )
+
     meta = _meta(config, context)
     write_selection_json(out_dir / "selection_decisions.json", decisions, meta)
     write_selection_csv(out_dir / "selection_decisions.csv", decisions)
@@ -611,6 +622,12 @@ def _select(config: Config, args: argparse.Namespace) -> int:
             "  画像 %d 枚が目視待ち（未アノテーションのビュー。側面像なら除外が必要）",
             images["pending"],
         )
+
+    diff_message = _pending_diff_message(
+        previous_summary, summary, previous_images, images
+    )
+    if diff_message is not None:
+        logger.info("  %s", diff_message)
 
     if summary["ready_to_build"] and not images["pending"] and not images["uncertain"]:
         logger.info("  pending/uncertain なし。development.json を生成できる状態")
@@ -1504,6 +1521,35 @@ def _read_image_decisions(path: Path) -> list:
                 data[key] = None
         result.append(ImageDecision(**data))
     return result
+
+
+def _pending_diff_message(
+    previous_summary: dict[str, Any] | None,
+    summary: dict[str, Any],
+    previous_images: dict[str, Any] | None,
+    images: dict[str, Any],
+) -> str | None:
+    """前回の ``select`` からの pending 差分メッセージ。
+
+    ``review_decisions.json`` の reviewer/reviewed_at は運用上ずっと空になり
+    がちで、そこから「今回のセッションで何件判定したか」は追えない。前回の
+    ``selection_decisions.json``/``image_decisions.json``（上書きする前に
+    読んだもの）との pending 件数の差分だけが確実に取れる進捗指標なので、
+    ``select`` のたびにログへ出す。初回実行（前回のファイルが無い）では
+    比較対象が無いので ``None`` を返す。
+    """
+    if previous_summary is None or previous_images is None:
+        return None
+    return (
+        "前回からの変化: pending annotation {} → {}（{:+d}） / 画像 {} → {}（{:+d}）"
+    ).format(
+        previous_summary["pending"],
+        summary["pending"],
+        summary["pending"] - previous_summary["pending"],
+        previous_images["pending"],
+        images["pending"],
+        images["pending"] - previous_images["pending"],
+    )
 
 
 def _read_selection(path: Path) -> list:
