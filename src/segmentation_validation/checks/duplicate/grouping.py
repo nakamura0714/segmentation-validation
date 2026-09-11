@@ -30,6 +30,23 @@ from ...core.measure import PairMeasurement
 GROUP_PREFIX = "DUP"
 
 
+def pair_key(file_uid: str, geometry_uid: str) -> str:
+    """重複グループのノード識別子。
+
+    ★``geometry_uid`` をそのままノードにしてはいけない。同じ annotation を複数の
+    データセットJSONへ再エクスポートしている実データ（PTE/PTR/mask136）では
+    ``geometry_uid`` が**データセットを跨いで同じ文字列**になるため、
+    「PTE内のペア」と「PTR内のペア」が同一ノードとして1グループに融合し、
+    データセットごとに独立しているはずの重複関係が壊れる（実測84 geometry_uid /
+    234 annotation が自動採否を受けられず pending のまま残っていた）。
+
+    ペアは同一ファイル（＝同一データセットの同一画像）内でしか作られないので、
+    ``file_uid``（``source_json`` を含むのでデータセット単位で一意）を前置すれば
+    データセットまで含めて一意になる。
+    """
+    return f"{file_uid}::{geometry_uid}"
+
+
 class DuplicateKind(StrEnum):
     EXACT_SAME_LABEL = "exact_same_label"
     EXACT_DIFFERENT_LABEL = "exact_different_label"
@@ -47,7 +64,16 @@ class ClassifiedPair:
 
     @property
     def uids(self) -> tuple[str, str]:
+        """相手参照として Issue に載せる素の ``geometry_uid``。"""
         return (self.pair.uid_a, self.pair.uid_b)
+
+    @property
+    def keys(self) -> tuple[str, str]:
+        """グループ化・レコード引き当てに使うキー（:func:`pair_key` 参照）。"""
+        return (
+            pair_key(self.pair.file_uid, self.pair.uid_a),
+            pair_key(self.pair.file_uid, self.pair.uid_b),
+        )
 
 
 def classify(pairs: Iterable[PairMeasurement], config: Config) -> list[ClassifiedPair]:
@@ -85,7 +111,7 @@ def classify(pairs: Iterable[PairMeasurement], config: Config) -> list[Classifie
 
 
 def build_groups(pairs: Sequence[ClassifiedPair]) -> dict[str, str]:
-    """重複ペアを連結成分として束ね、``geometry_uid -> group_id`` を返す。
+    """重複ペアを連結成分として束ね、:func:`pair_key` -> ``group_id`` を返す。
 
     ``A≒B``, ``B≒C`` なら A/B/C を1グループにする。実データでもサイズ3の
     グループが3件あるので、ペア単位だけでは足りない。
@@ -105,22 +131,22 @@ def build_groups(pairs: Sequence[ClassifiedPair]) -> dict[str, str]:
             parent[root_a] = root_b
 
     for classified in pairs:
-        union(*classified.uids)
+        union(*classified.keys)
 
     # 出現順にグループ番号を振る（実行ごとに同じIDになるように）。
     numbers: dict[str, str] = {}
     assignment: dict[str, str] = {}
     for classified in pairs:
-        for uid in classified.uids:
-            root = find(uid)
+        for key in classified.keys:
+            root = find(key)
             if root not in numbers:
                 numbers[root] = f"{GROUP_PREFIX}_{len(numbers) + 1:04d}"
-            assignment[uid] = numbers[root]
+            assignment[key] = numbers[root]
     return assignment
 
 
 def group_members(assignment: dict[str, str]) -> dict[str, list[str]]:
     members: dict[str, list[str]] = {}
-    for uid, group_id in assignment.items():
-        members.setdefault(group_id, []).append(uid)
+    for key, group_id in assignment.items():
+        members.setdefault(group_id, []).append(key)
     return {key: sorted(value) for key, value in members.items()}

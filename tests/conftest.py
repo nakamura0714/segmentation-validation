@@ -230,10 +230,16 @@ def make_pair(
     containment_a_in_b: float = 1.0,
     containment_b_in_a: float = 1.0,
     file: str = FILE,
+    source_json: str = SOURCE,
 ) -> PairMeasurement:
-    """同一ファイル内のマスク2枚の関係。既定は「画素完全一致・同一ラベル」= D01。"""
+    """同一ファイル内のマスク2枚の関係。既定は「画素完全一致・同一ラベル」= D01。
+
+    ``source_json`` を変えると別データセットの同じ画像のペアになる
+    （``file_uid`` がデータセット単位で一意になる。``make_record`` と同じ理由で、
+    クロスデータセット再エクスポートの再現に要る）。
+    """
     return PairMeasurement(
-        file_uid=f"{SOURCE}::{INSTITUTION}/{STUDY}/{SERIES}/{file}",
+        file_uid=f"{source_json}::{INSTITUTION}/{STUDY}/{SERIES}/{file}",
         uid_a=uid_a,
         uid_b=uid_b,
         iou=iou,

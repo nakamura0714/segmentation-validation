@@ -141,10 +141,11 @@ def _content_key(
 class _UnionFind:
     """``annotation_uid`` を要素とする単純な union-find。
 
-    D01-D04 の ``grouping.build_groups`` は ``geometry_uid`` を要素にしており
-    データセットを跨ぐと衝突しうるので、ここでは別実装として
-    ``annotation_uid`` を要素にする（``XDUP_%04d`` という別 prefix も、
-    D01-D04 の ``DUP_%04d`` と ID 空間が衝突しないようにするため）。
+    D01-D04 の ``grouping.build_groups`` は同一ファイル内のペアしか束ねないので
+    ``grouping.pair_key``（``file_uid`` 前置）を要素にしているが、D05 は
+    データセットを跨いでペアを作るため ``file_uid`` では束ねられない。
+    そこで別実装として ``annotation_uid`` を要素にする（``XDUP_%04d`` という
+    別 prefix も、D01-D04 の ``DUP_%04d`` と ID 空間が衝突しないようにするため）。
     """
 
     def __init__(self) -> None:

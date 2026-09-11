@@ -54,9 +54,17 @@ EXPECTED_ISSUES = {
     "D01_EXACT_DUPLICATE": 668,
     # ★新規（3データセットでは0件でEXPECTED_ZERO側にあった）。
     "D02_EXACT_MASK_LABEL_CONFLICT": 46,
-    "D03_NEAR_DUPLICATE": 16,
+    # ★D03/D04 は「重複グループのノードキーを file_uid 込みにした」修正で半減した
+    # （16→8 / 28→12）。減った24件は**実体の無い誤帰属**だった: ペアは
+    # データセットごとのファイル単位で作られるのに、相手レコードを素の
+    # geometry_uid で引いていたため、自分のデータセットでは D05 非代表として
+    # checks から隠された annotation のペアが、**別データセットの同名
+    # geometry_uid のレコード**に issue を張っていた。同じ重複関係は正しい
+    # データセット側で報告されており、関係そのものは1件も失われていない
+    # （修正前後の issue 集合を突き合わせて確認済み）。
+    "D03_NEAR_DUPLICATE": 8,
     "D04_CONTAINED_DIFFERENT_LABEL": 3,
-    "D04_CONTAINED_DUPLICATE": 28,
+    "D04_CONTAINED_DUPLICATE": 12,
     # ★新規。複数データセットに同一annotationが重複エクスポートされている
     # （PTE/PTR/kaggle等）ケースは、単一データセットだけでは検出できない。
     "D05_CROSS_DATASET_DUPLICATE": 5786,
@@ -96,12 +104,18 @@ EXPECTED_ZERO = (
 )
 
 # --- 採否（目視前）
-EXPECTED_DECISIONS = {"keep": 16002, "pending": 2392, "exclude": 101}
+# ★D01の自動exclude が 101→167 に増え、その分 pending が 2392→2326 に減った。
+# 再エクスポートで geometry_uid がデータセットを跨いで重複していると、
+# 重複グループが素の geometry_uid で融合し、自動採否が**どれか1データセット分に
+# しか付かなかった**（残りは自動判定を持たないまま D05 の TIE で pending に滞留）。
+# 増えた66件の annotation は、いずれも目視で既に exclude と判定済みのものと
+# 一致した（66/66）。
+EXPECTED_DECISIONS = {"keep": 16002, "pending": 2326, "exclude": 167}
 EXPECTED_REASONS = {
     "no_issue_detected": 14932,
     "kept_without_full_check": 1070,
-    "review_required": 2392,
-    "older_exact_duplicate": 101,
+    "review_required": 2326,
+    "older_exact_duplicate": 167,
 }
 EXPECTED_IMAGE_DECISIONS = {"keep": 11328, "pending": 33, "exclude": 35714}
 EXPECTED_IMAGE_CLASSES = {
@@ -216,7 +230,8 @@ def test_annotation単位と画像単位の内訳(issues):
     per_annotation = sum(1 for i in issues if i.geometry_uid is not None)
     per_image = sum(1 for i in issues if i.geometry_uid is None)
 
-    assert (per_annotation, per_image) == (12950, 36831)
+    # annotation単位が24件減っているのは D03/D04 の誤帰属分（EXPECTED_ISSUES 参照）。
+    assert (per_annotation, per_image) == (12926, 36831)
 
 
 def test_参照マスクのカバレッジ(counts, context):
@@ -246,14 +261,20 @@ def decisions(context, issues):
     )
 
 
-def test_D01の自動採否は101件でundecidableは2件(context, issues):
-    """★3データセットのときは undecidable が0件だったが、12データセットでは
-    2件出るようになった。理由は timestamp 自体が壊れているのではなく、
-    ``build_automatic_decisions`` が ``context.records``（in-scope のみ）しか
-    受け取らないため: D01ペアの相手が ``target_labels`` で対象外
-    （out_of_scope）になっている annotation だと、そちらの timestamp を
-    引けず ``timestamp_missing`` になる。この2件は自動決定せず目視に回すのが
-    正しい（対象外の annotation まで検証対象に含めるという話ではない）。
+def test_D01の自動採否は167件でundecidableは0件(context, issues):
+    """★101→167、undecidable 2→0。どちらも「重複グループのノードキーを
+    ``file_uid`` 込みにした」修正の結果。
+
+    101件だったのは、再エクスポートで ``geometry_uid`` がデータセットを跨いで
+    重複していると、素の geometry_uid をノードにした union-find が別データセット
+    のペア同士を1グループへ融合し、自動採否が**どれか1データセット分にしか
+    付かなかった**ため（実測84 geometry_uid / 234 annotation が該当）。
+
+    undecidable が2件出ていたのも同じ衝突の産物だった。実体は
+    ``ETR_ChestMetry_PI6px_abnormal_non_pneumothorax`` の**両端点とも対象外
+    ラベル**のペア1組で、本来そもそも自動決定する対象が無い。素の geometry_uid
+    で引いていたため、別データセットの同名 geometry_uid の in-scope レコードを
+    掴んで「timestamp が引けない2件」に化けていた。
     """
     config = context.config
     duplicates, undecidable = build_automatic_decisions(
@@ -262,10 +283,9 @@ def test_D01の自動採否は101件でundecidableは2件(context, issues):
     excluded = [d for d in duplicates.values() if d.decision is Decision.EXCLUDE]
     kept = [d for d in duplicates.values() if d.decision is Decision.KEEP]
 
-    assert len(excluded) == 101
-    assert len(kept) == 101, "各グループはサイズ2なので keep も101件"
-    assert len(undecidable) == 2
-    assert set(undecidable.values()) == {"timestamp_missing"}
+    assert len(excluded) == 167
+    assert len(kept) == 167, "各グループはサイズ2なので keep も167件"
+    assert undecidable == {}
     # M01-M05 は実データで0件なので自動 exclude も0件（ここは変わらず）。
     assert build_broken_decisions(issues, config) == {}
 
@@ -299,9 +319,13 @@ def test_採否マスタの不変条件(context, decisions):
 
 
 def test_目視の実作業量(decisions):
-    """annotation 2392件 = 開く画像 2278枚。工数の見積りは画像枚数で行う。"""
+    """annotation 2326件 = 開く画像 2278枚。工数の見積りは画像枚数で行う。
+
+    annotation は66件減ったが開く画像枚数は変わらない（D01で自動excludeに
+    なった66件は、いずれも目視対象が他にも載っている画像の中にある）。
+    """
     pending = [d for d in decisions if d.final_decision is Decision.PENDING]
-    assert len(pending) == 2392
+    assert len(pending) == 2326
     assert len({d.file_uid for d in pending}) == 2278
 
 

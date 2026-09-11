@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Iterator
 
 from ..base import Category, CheckContext, Issue, ReviewPriority, Severity
-from .grouping import ClassifiedPair
+from .grouping import ClassifiedPair, pair_key
 
 
 def emit_pair(
@@ -24,8 +24,13 @@ def emit_pair(
     groups: dict[str, str],
 ) -> Iterator[Issue]:
     pair = classified.pair
+    # ★ペアの相手を素の geometry_uid で引き当ててはいけない。再エクスポートで
+    # データセットを跨いで同じ geometry_uid が存在するため、別データセットの
+    # レコードに Issue が誤帰属する（実データで発生していた）。ペアは同一ファイル
+    # 内でしか作られないので、そのファイルのレコードだけから引く。
+    in_file = {r.geometry_uid: r for r in ctx.by_file.get(pair.file_uid, ())}
     for uid, other in ((pair.uid_a, pair.uid_b), (pair.uid_b, pair.uid_a)):
-        record = getattr(ctx, "by_uid", {}).get(uid)
+        record = in_file.get(uid)
         if record is None:
             continue
         yield ctx.issue(
@@ -36,7 +41,7 @@ def emit_pair(
             severity=severity,
             review_priority=review_priority,
             related_geometry_uids=(other,),
-            duplicate_group_id=groups.get(uid),
+            duplicate_group_id=groups.get(pair_key(pair.file_uid, uid)),
             kind=classified.kind.value,
             iou=round(pair.iou, 6),
             containment=round(classified.max_containment, 6),

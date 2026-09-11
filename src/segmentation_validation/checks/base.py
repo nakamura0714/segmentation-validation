@@ -146,7 +146,7 @@ class CheckContext:
     config: Config
     # 検証対象の annotation のみ。config.validation.target_labels で絞られる。
     # ここで絞ることで、15個のチェックを触らずに全てがスコープに従う。
-    # ペア系も相手が対象外なら ``by_uid`` に無いので自動的に片側だけ報告される。
+    # ペア系も相手が対象外なら ``by_file`` に無いので自動的に片側だけ報告される。
     records: tuple[AnnotationRecord, ...]
     # 対象外の annotation。チェックは走らせないが採否マスタには1行残す。
     out_of_scope: tuple[AnnotationRecord, ...] = ()
@@ -176,13 +176,10 @@ class CheckContext:
     )
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self, "by_uid", {record.geometry_uid: record for record in self.records}
-        )
-        # ``by_uid`` は bare geometry_uid キーなので、データセットを跨いで同じ
-        # geometry_uid が再エクスポートされていると衝突する（後勝ちで上書きされる）。
-        # ペア系チェック（D01-D04）は同一 dataset 内でしかペアを作らないため、
-        # 相手レコードの引き当ては dataset_id まで含めた annotation_uid で行う。
+        # ★素の geometry_uid で引く索引は置かない。データセットを跨いで同じ
+        # geometry_uid が再エクスポートされている実データがあり、後勝ちで
+        # 上書きされた索引を引くと別データセットのレコードに誤帰属する。
+        # 引き当ては annotation_uid（dataset込み）か by_file（ファイル単位）で行う。
         object.__setattr__(
             self,
             "by_annotation_uid",

@@ -21,7 +21,10 @@ from segmentation_validation.selection.automatic import (
 from segmentation_validation.selection.decisions import (
     AutomaticDecision,
     Decision,
+    DecisionSource,
+    HumanDecision,
     Reason,
+    build_decisions,
 )
 
 OLD = "2026-01-01 00:00:00+00:00"
@@ -63,7 +66,7 @@ def test_timestampが同値なら自動決定せず目視へ回す(config):
     )
 
     assert decisions == {}
-    assert undecidable == {"A": UNDECIDABLE_TIE, "B": UNDECIDABLE_TIE}
+    assert undecidable == {KEY_A: UNDECIDABLE_TIE, KEY_B: UNDECIDABLE_TIE}
 
 
 def test_timestampが欠損なら自動決定せず目視へ回す(config):
@@ -74,7 +77,7 @@ def test_timestampが欠損なら自動決定せず目視へ回す(config):
     )
 
     assert decisions == {}
-    assert undecidable == {"A": UNDECIDABLE_MISSING, "B": UNDECIDABLE_MISSING}
+    assert undecidable == {KEY_A: UNDECIDABLE_MISSING, KEY_B: UNDECIDABLE_MISSING}
 
 
 def test_timestampが解釈不能なら自動決定せず目視へ回す(config):
@@ -105,6 +108,41 @@ def test_3件のグループなら最新1件だけ残す(config):
     assert decisions[KEY_A].decision is Decision.EXCLUDE
     assert decisions[KEY_B].decision is Decision.EXCLUDE
     assert decisions[KEY_A].kept_geometry_uid == "C"
+
+
+def test_同じgeometry_uidが別データセットにあっても両方が自動決着する(config):
+    """★実データ由来の不具合。PTE/PTR/mask136 は同じ annotation を再エクスポート
+    しており、``geometry_uid`` が**データセットを跨いで同じ文字列**になる。
+
+    以前は素の geometry_uid をグルーピングのノードにしていたため、
+    「PTE内のペア」と「PTR内のペア」が1グループへ融合し、自動採否が
+    どちらか1データセット分にしか付かなかった。残った側は自動判定が無いまま
+    D05のTIEで review_required になり pending で滞留する（実測84 geometry_uid /
+    234 annotation）。両データセットが独立に決着することを固定する。
+    """
+    other, other_json = "OTHER", "other.json"
+    records = [
+        make_record("A", timestamp=OLD),
+        make_record("B", timestamp=NEW),
+        make_record("A", dataset_id=other, source_json=other_json, timestamp=OLD),
+        make_record("B", dataset_id=other, source_json=other_json, timestamp=NEW),
+    ]
+    pairs = [make_pair("A", "B"), make_pair("A", "B", source_json=other_json)]
+    decisions, undecidable = build_automatic_decisions(records, pairs, config)
+
+    assert undecidable == {}
+    assert set(decisions) == {KEY_A, KEY_B, f"{other}::A", f"{other}::B"}
+    # 古い方（A）は**どちらのデータセットでも**exclude になる。
+    assert decisions[KEY_A].decision is Decision.EXCLUDE
+    assert decisions[f"{other}::A"].decision is Decision.EXCLUDE
+    assert decisions[KEY_B].decision is Decision.KEEP
+    assert decisions[f"{other}::B"].decision is Decision.KEEP
+    # グループが融合していないこと（融合すると group_size が 4 になる）。
+    assert all(d.detail["group_size"] == 2 for d in decisions.values())
+    assert (
+        decisions[KEY_A].duplicate_group_id
+        != decisions[f"{other}::A"].duplicate_group_id
+    )
 
 
 def test_ラベルが違う完全一致は自動採否しない(config):
@@ -148,6 +186,88 @@ def test_壊れたマスクのexcludeがD01のkeepに勝つ():
         merged = merge_automatic(*sources)
         assert merged["A"].decision is Decision.EXCLUDE
         assert merged["A"].reason == BROKEN_MASK
+
+
+# ------------------------------------------- 手動判定は修正の前後で変わらない
+
+
+def _cross_dataset_case():
+    """クロスデータセット再エクスポートの最小形。
+
+    2データセット（SYNTH / OTHER）が同じ画像の同じ annotation（A=古い, B=新しい）を
+    それぞれ持つ。修正前は自動採否が片方のデータセットにしか付かなかった。
+    """
+    other, other_json = "OTHER", "other.json"
+    records = [
+        make_record("A", timestamp=OLD),
+        make_record("B", timestamp=NEW),
+        make_record("A", dataset_id=other, source_json=other_json, timestamp=OLD),
+        make_record("B", dataset_id=other, source_json=other_json, timestamp=NEW),
+    ]
+    pairs = [make_pair("A", "B"), make_pair("A", "B", source_json=other_json)]
+    return records, pairs, other
+
+
+def _by_annotation_uid(decisions):
+    return {f"{d.dataset_id}::{d.geometry_uid}": d for d in decisions}
+
+
+def test_手動判定は自動採否の有無で件数もannotation_uidも変わらない(config):
+    """★修正で自動 exclude が増えても、**既存の手動判定は最優先で保持**される。
+
+    「修正前」＝自動採否が付かなかった状態（``automatic={}``）、
+    「修正後」＝``build_automatic_decisions`` が両データセット分を返す状態、
+    として同じ入力で採否を組み、**手動判定の件数と annotation_uid 集合、
+    および各手動判定の結論**が完全に一致することを固定する。
+    """
+    records, pairs, other = _cross_dataset_case()
+    # 古い方（A）を人間が keep と判定済み。自動採否は exclude を出すので真っ向から
+    # 食い違う組み合わせにして、人間側が勝つことを見る。
+    human = {
+        f"{DATASET}::A": HumanDecision(
+            geometry_uid="A", decision=Decision.KEEP, reason="visually_valid",
+            reviewer="reviewer@example.com", dataset_id=DATASET,
+        ),
+        f"{other}::B": HumanDecision(
+            geometry_uid="B", decision=Decision.EXCLUDE, reason="invalid_annotation",
+            reviewer="reviewer@example.com", dataset_id=other,
+        ),
+    }
+
+    automatic, _ = build_automatic_decisions(records, pairs, config)
+    before = build_decisions(records, [], config, {}, human)  # 修正前（自動採否なし）
+    after = build_decisions(records, [], config, automatic, human)  # 修正後
+
+    def manual(decisions):
+        return {
+            uid: (d.final_decision, d.reason)
+            for uid, d in _by_annotation_uid(decisions).items()
+            if d.decision_source is DecisionSource.HUMAN
+        }
+
+    # 件数・annotation_uid 集合・結論のいずれも差分が無い。
+    assert set(manual(before)) == set(human)
+    assert manual(after) == manual(before)
+    assert len(manual(after)) == len(human) == 2
+
+    # 自動 exclude と食い違っても人間の keep が勝ち、覆したことが記録される。
+    before_by_uid = _by_annotation_uid(before)
+    after_by_uid = _by_annotation_uid(after)
+    assert automatic[f"{DATASET}::A"].decision is Decision.EXCLUDE
+    assert after_by_uid[f"{DATASET}::A"].final_decision is Decision.KEEP
+    assert after_by_uid[f"{DATASET}::A"].overrides_automatic is True
+
+    # 差分は手動判定の無い annotation にしか出ない。
+    changed = {
+        uid
+        for uid, d in after_by_uid.items()
+        if d.final_decision is not before_by_uid[uid].final_decision
+    }
+    assert changed.isdisjoint(human)
+    # 修正後は手動判定の無い OTHER::A が自動 exclude になる（これが今回の修正の効果）。
+    assert after_by_uid[f"{other}::A"].final_decision is Decision.EXCLUDE
+    assert after_by_uid[f"{other}::A"].decision_source is DecisionSource.AUTOMATIC
+    assert changed == {f"{other}::A"}
 
 
 def test_集計は重複グループ数をkeepの件数で数える(config):

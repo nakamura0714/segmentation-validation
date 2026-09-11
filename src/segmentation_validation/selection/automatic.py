@@ -26,6 +26,7 @@ from ..checks.duplicate.grouping import (
     build_groups,
     classify,
     group_members,
+    pair_key,
 )
 from ..config import Config
 from ..core.measure import PairMeasurement
@@ -92,14 +93,20 @@ def build_automatic_decisions(
 ) -> tuple[dict[str, AutomaticDecision], dict[str, str]]:
     """D01 の重複グループについて自動採否を作る。
 
-    戻り値は ``(annotation_uid -> 決定, geometry_uid -> 自動決定できなかった理由)``。
-    前者のキーは ``f"{dataset_id}::{geometry_uid}"``
+    戻り値は ``(annotation_uid -> 決定, annotation_uid -> 自動決定できなかった理由)``。
+    キーはどちらも ``f"{dataset_id}::{geometry_uid}"``
     （``AnnotationRecord.annotation_uid`` と同じ形式。``build_decisions`` 側の
-    lookup キーと揃える）。後者は ``select`` が目視へ回すために使う
-    （D01 の重複グループは同一データセット内でしか組まれないので bare
-    geometry_uid のままでよい）。
+    lookup キーと揃える）。
+
+    ★**素の geometry_uid でグルーピングしてはいけない。** 重複グループ自体は
+    同一データセット内でしか組まれないが、``records`` / ``pairs`` は全データセット
+    分がまとめて渡ってくる。再エクスポートで ``geometry_uid`` がデータセットを
+    跨いで重複していると、素の geometry_uid をノードにした瞬間に別データセットの
+    ペア同士が1グループへ融合し、自動採否が**どれか1データセット分にしか付かない**
+    （残りは pending のまま残る）。実測で 84 geometry_uid / 234 annotation が
+    この状態だった。グルーピングも引き当ても :func:`pair_key` で行う。
     """
-    by_uid = {record.geometry_uid: record for record in records}
+    by_key = {pair_key(r.file_uid, r.geometry_uid): r for r in records}
     classified = classify(pairs, config)
     exact = [item for item in classified if item.kind is DuplicateKind.EXACT_SAME_LABEL]
     if not exact:
@@ -114,12 +121,12 @@ def build_automatic_decisions(
     decisions: dict[str, AutomaticDecision] = {}
     undecidable: dict[str, str] = {}
 
-    for uids in members.values():
-        group_id = all_groups.get(uids[0])
+    for keys in members.values():
+        group_id = all_groups.get(keys[0])
         stamps: list[tuple[datetime | None, str]] = []
-        for uid in uids:
-            record = by_uid.get(uid)
-            stamps.append((record.parsed_timestamp if record else None, uid))
+        for key in keys:
+            record = by_key.get(key)
+            stamps.append((record.parsed_timestamp if record else None, key))
 
         if any(stamp is None for stamp, _ in stamps):
             reason = UNDECIDABLE_MISSING
@@ -130,32 +137,34 @@ def build_automatic_decisions(
             reason = ""
 
         if reason:
-            for uid in uids:
-                undecidable[uid] = reason
+            for key in keys:
+                record = by_key.get(key)
+                # 対象外ラベル等で records に居ない相手は採否マスタにも行が無い。
+                if record is not None:
+                    undecidable[record.annotation_uid] = reason
             logger.debug("自動決定できない重複グループ %s: %s", group_id, reason)
             continue
 
         stamps.sort(key=lambda item: item[0])  # type: ignore[arg-type,return-value]
-        kept = stamps[-1][1]
-        for _, uid in stamps[:-1]:
-            record = by_uid[uid]
+        kept_record = by_key[stamps[-1][1]]
+        for _, key in stamps[:-1]:
+            record = by_key[key]
             decisions[record.annotation_uid] = AutomaticDecision(
-                geometry_uid=uid,
+                geometry_uid=record.geometry_uid,
                 decision=Decision.EXCLUDE,
                 reason=Reason.OLDER_EXACT_DUPLICATE.value,
-                kept_geometry_uid=kept,
-                related_geometry_uid=kept,
+                kept_geometry_uid=kept_record.geometry_uid,
+                related_geometry_uid=kept_record.geometry_uid,
                 duplicate_group_id=group_id,
-                detail={"group_size": len(uids)},
+                detail={"group_size": len(keys)},
             )
-        kept_record = by_uid[kept]
         decisions[kept_record.annotation_uid] = AutomaticDecision(
-            geometry_uid=kept,
+            geometry_uid=kept_record.geometry_uid,
             decision=Decision.KEEP,
             reason="newest_of_exact_duplicate_group",
-            kept_geometry_uid=kept,
+            kept_geometry_uid=kept_record.geometry_uid,
             duplicate_group_id=group_id,
-            detail={"group_size": len(uids)},
+            detail={"group_size": len(keys)},
         )
 
     return decisions, undecidable
