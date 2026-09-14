@@ -7,12 +7,35 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .labels import Label, label_keys
+
+#: engineer-set の元JSONファイル名の末尾（例:
+#: ``engineer-set-PTE_CX_MT_PI3_pneumothorax-20260904_061537.json``）に
+#: 埋め込まれた生成日時。
+_SOURCE_TIMESTAMP_RE = re.compile(r"(\d{8}_\d{6})\.json$")
+
+
+def source_generated_at(source_json: str) -> datetime | None:
+    """元データセットJSONの生成日時。ファイル名から取れなければ None。
+
+    ``checks/duplicate/d05_cross_dataset_duplicate.py``（クロスデータセット
+    重複の代表選び）と ``selection/build_dataset.py``（development.json
+    生成時の画像重複解消）の両方から使う共有ユーティリティ。「どちらの
+    生成日時を残すか」の向き（古い方/新しい方）は呼び出し側の判断に委ねる。
+    """
+    match = _SOURCE_TIMESTAMP_RE.search(source_json)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)

@@ -33,15 +33,13 @@ D01-D04 は「同一ファイル（同一 dataset の同一画像）内」でし
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Mapping, Sequence
 
 from ...core.measure import ROLE_MASK, MaskMeasurement
-from ...core.records import AnnotationRecord
+from ...core.records import AnnotationRecord, source_generated_at
 from ...selection.decisions import AutomaticDecision, Decision, Reason
 from ..base import Category, CheckContext, Issue, ReviewPriority, Severity, build_issue
 
@@ -67,22 +65,6 @@ UNDECIDABLE_MISSING = "timestamp_missing"
 #: newest 側の情報専用の reason（final_decision には影響しない。D01 と同じ扱い）。
 NEWEST_OF_GROUP = "newest_of_cross_dataset_duplicate_group"
 
-#: engineer-set の元JSONファイル名の末尾（例:
-#: ``engineer-set-PTE_CX_MT_PI3_pneumothorax-20260904_061537.json``）に
-#: 埋め込まれた生成日時。
-_SOURCE_TIMESTAMP_RE = re.compile(r"(\d{8}_\d{6})\.json$")
-
-
-def _source_generated_at(source_json: str) -> datetime | None:
-    """元データセットJSONの生成日時。ファイル名から取れなければ None。"""
-    match = _SOURCE_TIMESTAMP_RE.search(source_json)
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S")
-    except ValueError:
-        return None
-
 
 def _pick_survivor(
     group_records: Sequence[AnnotationRecord],
@@ -105,7 +87,7 @@ def _pick_survivor(
         return group_records[newest], ""
 
     # timestampが全員同点。元データセットJSONの生成日時で決着を試みる。
-    source_stamps = [_source_generated_at(r.source_json) for r in group_records]
+    source_stamps = [source_generated_at(r.source_json) for r in group_records]
     if any(stamp is None for stamp in source_stamps):
         return None, UNDECIDABLE_MISSING
     if len({stamp for stamp in source_stamps}) < len(group_records):

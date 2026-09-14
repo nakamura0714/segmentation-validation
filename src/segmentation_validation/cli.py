@@ -738,7 +738,11 @@ def _serve(config: Config, args: argparse.Namespace) -> int:
 def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     from .report.selection_output import read_image_json, read_selection_json
     from .report.summary_md import write_selection_summary
-    from .selection.build_dataset import build_development_json, gate_message
+    from .selection.build_dataset import (
+        build_development_json,
+        gate_message,
+        resolve_image_duplicates,
+    )
 
     out_dir = config.validation_dir / _fingerprint(config)
     selection_path = out_dir / "selection_decisions.json"
@@ -798,6 +802,31 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
             return EXIT_ISSUES
 
     version_tag = args.version_tag or datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    # データセットを横断した画像重複の解消。★品質上の exclude ではない
+    # ―― 「同じ物理画像を別データセット側で既に採用しているため、今回の
+    # development.json 生成では見送る」件だけを扱う。image_decisions.json /
+    # selection_decisions.json / review_decisions.json のいずれも書き換えない
+    # （build_by_image は build_development_json への入力を作るためだけの
+    # ローカル変数で、build-dataset を実行するたびに毎回計算し直す）。
+    dedup = resolve_image_duplicates(image_rows, rows, by_image)
+    build_by_image = dict(by_image)
+    if dedup.skipped_file_uids:
+        for uid in dedup.skipped_file_uids:
+            # build_development_json が理解できる語彙が keep/exclude しか
+            # 無いための一時的な代入（file entryを丸ごと落とす動作を流用する）。
+            # ログ/CSV側では「exclude」ではなく「重複によるskip」であることを
+            # 明示している。
+            build_by_image[uid] = Decision.EXCLUDE.value
+        dup_report_path = config.development_dir / version_tag / "image_duplicates.csv"
+        _write_duplicate_report(dup_report_path, dedup.report_rows)
+        logger.warning(
+            "データセット横断で同一画像の重複を検出し、development.json生成時に"
+            "%d 件をskipした（品質上のexcludeではない。詳細: %s）",
+            len(dedup.skipped_file_uids),
+            dup_report_path,
+        )
+
     results = []
     for source in config.dataset_sources():
         from .adapters.engineer_set import dataset_id_for
@@ -813,7 +842,7 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
                 pending_as=args.pending_as,
                 uncertain_as=args.uncertain_as,
                 meta_extra={"fingerprint": _fingerprint(config)},
-                image_decisions=by_image,
+                image_decisions=build_by_image,
             )
         )
         logger.info(
@@ -856,6 +885,25 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     )
     logger.info("selection_summary.md -> %s", summary_path)
     return EXIT_OK
+
+
+def _write_duplicate_report(path: Path, rows: list[dict[str, Any]]) -> None:
+    """データセット横断の画像重複解消結果をCSVへ書く（監査用）。
+
+    ``resolve_image_duplicates`` の戻り値をそのまま書き出すだけ。呼ぶたびに
+    上書きする（``image_decisions.json`` 等と違って累積させる必要は無い —
+    今回の `build-dataset` 実行1回ぶんの結果だけを表す）。
+    """
+    import csv
+
+    from .selection.build_dataset import DUPLICATE_REPORT_COLUMNS
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DUPLICATE_REPORT_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def _review(config: Config, args: argparse.Namespace) -> int:

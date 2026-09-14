@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..config import Config
+from ..core.records import source_generated_at
 from .decisions import Decision
 
 logger = logging.getLogger(__name__)
@@ -220,3 +221,184 @@ def _tool_version() -> str:
     from .. import __version__
 
     return __version__
+
+
+# ------------------------------------------------------ 画像重複の解消（横断）
+
+#: 監査用CSV/レポートの列。``keep``/``exclude`` という語は使わない —— 通常の
+#: 採否（品質判断）とは別軸の「development.json 出力からのskip」であることを
+#: 混同させないため。
+DUPLICATE_REPORT_COLUMNS = (
+    "image_path",
+    "dataset_id",
+    "file_uid",
+    "has_kept_annotations",
+    "n_kept_annotations",
+    "decision",
+    "reason",
+)
+
+#: `decision` 列の値。
+SELECTED = "selected"
+SKIPPED_DUPLICATE = "skipped_duplicate"
+
+
+@dataclass(frozen=True)
+class DuplicateCandidate:
+    """同一 ``image_path`` を持つ、画像単位で keep 確定している候補1件。"""
+
+    dataset_id: str
+    source_json: str
+    file_uid: str
+    image_path: str
+    has_kept_annotations: bool
+    # 優先順位の判定には使わない（監査用の参考表示のみ）。
+    n_kept_annotations: int
+
+
+@dataclass
+class DedupResult:
+    """``resolve_image_duplicates`` の結果。
+
+    ``skipped_file_uids`` は development.json への出力から**この回だけ**
+    外す file_uid の集合。**品質上の exclude ではない** —— 「同じ物理画像を
+    別データセット側で採用したため、今回の development.json 生成では
+    見送った」件のみが入る。呼び出し側はこれを ``image_decisions.json`` 等の
+    永続ファイルへ一切書き戻してはならない（`build-dataset` を実行するたびに
+    その時点の状態から毎回計算し直す一時的な値）。
+    """
+
+    skipped_file_uids: frozenset[str]
+    # 監査用の全候補一覧（採用/skipと理由込み）。重複が無かった image_path は
+    # 含めない。CSV/ログ出力に使う。
+    report_rows: list[dict[str, Any]] = field(default_factory=list)
+
+
+def resolve_image_duplicates(
+    image_rows: list[dict[str, Any]],
+    selection_rows: list[dict[str, Any]],
+    by_image: Mapping[str, str],
+) -> DedupResult:
+    """データセットを横断して同一画像（同じ ``image_path``）の重複を解消する。
+
+    ``image_decisions.py``（単一データセット内の画像採否）にも
+    ``build_development_json``（1元JSONにつき1回しか呼ばれない）にも
+    他データセットとの重複は見えない。ここが唯一「全データセットの画像を
+    横断して見る」場所になる。
+
+    優先順位（同じ ``image_path`` を持つ複数 file_uid が候補になったとき）:
+
+    1. keep となる annotation を1件以上持つ方を、持たない方より常に優先する
+       （annotation件数の多寡は使わない — 「あり/なし」の二値だけを見る）
+    2. 同率（両方あり、または両方なし）なら、元データセットJSONの生成日時
+       （``source_generated_at``）が**新しい**方を優先する
+       （D05のクロスデータセット重複判定とは意図的に逆向き。D05は
+       「同一annotationの再エクスポート」なので最初に登録された方を残すが、
+       ここでは「より新しく登録されたデータセットの状態を残す」という
+       別の運用判断のため）
+    3. 生成日時まで同一なら ``dataset_id`` の昇順で決定的に決める
+
+    ``by_image`` は override 適用後（``image_decision_overrides.json``による
+    exclude→keep反映後）の file_uid -> final_decision。ここで ``"keep"``
+    でない候補（画像自体が最終的に exclude のもの）は、そもそも
+    development.json に出ないため重複判定の対象にしない。
+
+    戻り値の ``skipped_file_uids`` は development.json 生成時にだけ使う
+    一時的な集合であり、``image_decisions.json`` 等へは絶対に書き戻さない
+    （呼び出し側の責務。ここでは何のファイルも読み書きしない）。
+    """
+    kept_annotation_counts: dict[str, int] = {}
+    for row in selection_rows:
+        if row["final_decision"] == Decision.KEEP.value:
+            file_uid = row["file_uid"]
+            kept_annotation_counts[file_uid] = kept_annotation_counts.get(file_uid, 0) + 1
+
+    candidates_by_path: dict[str, list[DuplicateCandidate]] = {}
+    for row in image_rows:
+        file_uid = row["file_uid"]
+        if by_image.get(file_uid) != Decision.KEEP.value:
+            continue
+        n_kept = kept_annotation_counts.get(file_uid, 0)
+        candidate = DuplicateCandidate(
+            dataset_id=row["dataset_id"],
+            source_json=row["source_json"],
+            file_uid=file_uid,
+            image_path=row["image_path"],
+            has_kept_annotations=n_kept > 0,
+            n_kept_annotations=n_kept,
+        )
+        candidates_by_path.setdefault(candidate.image_path, []).append(candidate)
+
+    skipped: set[str] = set()
+    report_rows: list[dict[str, Any]] = []
+    for image_path, candidates in candidates_by_path.items():
+        if len(candidates) < 2:
+            continue
+        winner = _pick_winner(candidates)
+        for candidate in candidates:
+            is_winner = candidate.file_uid == winner.file_uid
+            report_rows.append(
+                {
+                    "image_path": image_path,
+                    "dataset_id": candidate.dataset_id,
+                    "file_uid": candidate.file_uid,
+                    "has_kept_annotations": candidate.has_kept_annotations,
+                    "n_kept_annotations": candidate.n_kept_annotations,
+                    "decision": SELECTED if is_winner else SKIPPED_DUPLICATE,
+                    "reason": _dedup_reason(candidate, candidates, is_winner),
+                }
+            )
+            if not is_winner:
+                skipped.add(candidate.file_uid)
+
+    return DedupResult(skipped_file_uids=frozenset(skipped), report_rows=report_rows)
+
+
+def _pick_winner(candidates: list[DuplicateCandidate]) -> DuplicateCandidate:
+    """同一 ``image_path`` の候補群から1件を選ぶ。
+
+    ``resolve_image_duplicates`` のdocstringにある優先順位そのもの。
+    生成日時が取れない（ファイル名から解析できない）候補は、常に
+    「取れる候補」より劣後させる —— 不明を有利に扱わない安全側の設計。
+
+    実装上の工夫: 候補をあらかじめ ``dataset_id`` 昇順に並べてから
+    ``max()`` で最優先の1件を選ぶ。``max()`` は同点のとき**最初に出会った
+    要素**を返す（後から出てきた同点要素で置き換えない）ので、事前に
+    dataset_id 昇順で並べておけば「(1)annotationの有無 (2)生成日時」が
+    同点だったときに自動的に dataset_id 昇順の1件目が勝ち残る
+    ——最終フォールバックのために別途分岐を書く必要が無い。
+    """
+
+    def sort_key(candidate: DuplicateCandidate) -> tuple[bool, float]:
+        generated_at = source_generated_at(candidate.source_json)
+        timestamp = generated_at.timestamp() if generated_at is not None else float("-inf")
+        return (candidate.has_kept_annotations, timestamp)
+
+    ordered = sorted(candidates, key=lambda c: c.dataset_id)
+    return max(ordered, key=sort_key)
+
+
+def _dedup_reason(
+    candidate: DuplicateCandidate,
+    group: list[DuplicateCandidate],
+    is_winner: bool,
+) -> str:
+    """1候補ぶんの採用/skip理由を、グループ全体の構成から説明する。
+
+    ``candidate`` と勝者だけを比べると、勝者自身については「自分自身との
+    比較」になり常に一致してしまい、本当の決め手（annotationの有無）が
+    埋もれる。そのため常に**グループ全体**の構成（annotationの有無が
+    割れているか、生成日時が割れているか）を見て理由を決める。
+    """
+    mixed_annotations = len({c.has_kept_annotations for c in group}) > 1
+    if mixed_annotations:
+        if candidate.has_kept_annotations:
+            return "annotationあり（他候補はannotationなし）"
+        return "annotationなし（他候補にannotationありが存在）"
+
+    reason = "annotationあり" if candidate.has_kept_annotations else "annotationなし"
+    reason += "で同率、"
+    dates = {source_generated_at(c.source_json) for c in group}
+    if len(dates) > 1:
+        return reason + ("登録日時が最も新しい" if is_winner else "登録日時が採用側より古い")
+    return reason + "登録日時も同一のためdataset_id昇順"
