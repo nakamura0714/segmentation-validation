@@ -300,6 +300,20 @@ class Config:
         """
         return self.project_root / "review_policy" / "image_decision_overrides.json"
 
+    @property
+    def review_decisions_path(self) -> Path:
+        """人間の目視判定の正本。
+
+        ``image_decision_overrides_path`` と同じ理由で fingerprint に依存しない
+        場所に置き、git 管理する。fingerprint は対象JSONの mtime/sha256 から
+        決まるので、データセットを1本足すだけ・symlink を張り替えるだけで変わる。
+        目視結果は再生成できない唯一の資産なので、それに巻き込まれてはいけない。
+
+        ``output/validation/<fingerprint>/review/review_decisions.json`` は
+        この正本のスナップショット（派生物）であって、読み込み元にはしない。
+        """
+        return self.project_root / "review" / "review_decisions.json"
+
     def resolve(self, path_like: str) -> Path:
         """設定中の相対パスをプロジェクトルート基準で解決する。
 

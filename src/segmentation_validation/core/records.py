@@ -100,6 +100,25 @@ class AnnotationRecord:
         )
 
     @property
+    def stable_file_uid(self) -> str:
+        """再エクスポートを跨いでも変わらない画像の識別子。
+
+        ``file_uid`` は ``source_json``（``engineer-set-...-20260624_080014.json``
+        のように生成日時が埋まったファイル名そのもの）を含むため、元JSONを
+        再エクスポートするだけで全画像ぶんが別物になる。``dataset_id`` は
+        ``adapters/engineer_set.py::dataset_id_for`` が末尾の日時スタンプを
+        落とすので安定している。人間の目視判定のように fingerprint を跨いで
+        引き継ぎたいものは必ずこちらを使う。
+
+        走査中のグループ化には引き続き ``file_uid`` を使う。同一 fingerprint
+        内では両者とも一意で、既存の突合を変えない方が安全なため。
+        """
+        return (
+            f"{self.dataset_id}::{self.institution}"
+            f"/{self.study}/{self.series}/{self.file}"
+        )
+
+    @property
     def annotation_uid(self) -> str:
         """データセットを跨いでも一意になる識別子。"""
         return f"{self.dataset_id}::{self.geometry_uid}"
@@ -183,6 +202,18 @@ class FileGroup:
     def file_uid(self) -> str:
         return (
             f"{self.source_json}::{self.institution}"
+            f"/{self.study}/{self.series}/{self.file}"
+        )
+
+    @property
+    def stable_file_uid(self) -> str:
+        """再エクスポートを跨いでも変わらない画像の識別子。
+
+        ``AnnotationRecord.stable_file_uid`` と同じ規則。両者は同じ画像に
+        対して必ず同じ値を返す。
+        """
+        return (
+            f"{self.dataset_id}::{self.institution}"
             f"/{self.study}/{self.series}/{self.file}"
         )
 

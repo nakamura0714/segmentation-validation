@@ -314,3 +314,99 @@ def test_contextが無ければ計測は判定しない(tmp_path):
     args = argparse.Namespace(allow_partial=False, allow_unmeasured=False)
 
     assert _check_issues_complete(path, args) is True
+
+
+# ------------------------------------------------- 4. 目視判定の正本を読めない
+
+
+def test_壊れた正本でselectが止まる(tmp_path):
+    """★読めないファイルを「判定が無い」と解釈しない。
+
+    空として扱うと、人間の判定を丸ごと落とした状態で select が通る。
+    目視済みの annotation が pending へ戻り、しかもログには何も出ない。
+    """
+    import pytest
+
+    from segmentation_validation.cli import _read_review_decisions
+
+    path = tmp_path / "review_decisions.json"
+    path.write_text("{壊れている", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        _read_review_decisions(path)
+
+
+def test_正本が無ければ空として通る(tmp_path):
+    """目視前・移行前でも select は動く。"""
+    from segmentation_validation.cli import _read_review_decisions
+
+    assert _read_review_decisions(tmp_path / "missing.json") == ({}, {})
+
+
+def test_正本が無ければ旧fingerprint配下へ落ちる(tmp_path):
+    """移行前のリポジトリでも従来どおり動く（1回だけ警告する）。"""
+    from segmentation_validation.cli import _resolve_review_decisions, _review_dir
+
+    config = Config(project_root=tmp_path)
+    legacy = _review_dir(config) / "review_decisions.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text('{"decisions": [], "image_decisions": []}', encoding="utf-8")
+
+    assert _resolve_review_decisions(config) == legacy
+
+
+def test_正本があればそちらを読む(tmp_path):
+    from segmentation_validation.cli import _resolve_review_decisions, _review_dir
+
+    config = Config(project_root=tmp_path)
+    for path in (
+        config.review_decisions_path,
+        _review_dir(config) / "review_decisions.json",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"decisions": [], "image_decisions": []}', encoding="utf-8")
+
+    assert _resolve_review_decisions(config) == config.review_decisions_path
+
+
+# --------------------------------------------- 5. 統合JSONの file 単位の衝突
+
+
+def test_統合時のfile_id衝突で止まる(tmp_path):
+    """★衝突ゼロが前提。黙って上書きすると片方の annotation が消える。
+
+    実データでは (inst, study, series, file_id) 42,574件すべてで衝突しないが、
+    それは ``resolve_image_duplicates`` が効いているからで、前提が崩れたら
+    静かに壊れるのではなく止まってほしい。
+    """
+    import pytest
+
+    from segmentation_validation.selection.build_dataset import (
+        MergeCollision,
+        MergeResult,
+        merge_into,
+        new_merged_payload,
+    )
+
+    def payload(uid):
+        return {
+            "dataset": {
+                "inst": {
+                    "ST1": {
+                        "series_list": {
+                            "SE1": {
+                                "file_list": {
+                                    "F1": {"annotations": [{"geometry_uid": uid}]}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    accumulator = new_merged_payload()
+    result = MergeResult()
+    merge_into(accumulator, payload("u1"), "DS_A", result)
+    with pytest.raises(MergeCollision):
+        merge_into(accumulator, payload("u2"), "DS_B", result)

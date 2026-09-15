@@ -80,6 +80,9 @@ class BuildResult:
     files_already_empty: int = 0
     original_unchanged: bool = True
     overrides: dict[str, str] = field(default_factory=dict)
+    #: 元JSONの sha256（読み込み時点）。書き出し後の再読み込みと突き合わせて
+    #: 「元JSONを触っていない」ことを確認するのに使う。
+    source_sha256: str = ""
 
 
 def build_development_json(
@@ -92,19 +95,53 @@ def build_development_json(
     meta_extra: dict[str, Any] | None = None,
     image_decisions: Mapping[str, str] | None = None,
 ) -> BuildResult:
-    """1つの元JSONから開発用JSONを作る。
+    """1つの元JSONから開発用JSONを作って書き出す。
+
+    ``build_development_payload`` と ``write_development_json`` の薄いラッパ。
+    payload を使い回したい（統合JSONを作る）場合は分割した方を直接呼ぶ。
+    """
+    payload, result = build_development_payload(
+        source_path,
+        decisions,
+        out_path,
+        config,
+        pending_as=pending_as,
+        uncertain_as=uncertain_as,
+        meta_extra=meta_extra,
+        image_decisions=image_decisions,
+    )
+    write_development_json(payload, out_path, result, source_path)
+    return result
+
+
+def build_development_payload(
+    source_path: Path,
+    decisions: Mapping[str, str],
+    out_path: Path,
+    config: Config,
+    pending_as: str | None = None,
+    uncertain_as: str | None = None,
+    meta_extra: dict[str, Any] | None = None,
+    image_decisions: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any], BuildResult]:
+    """元JSONを読み、keep だけに絞った payload を組み立てる。**書き出さない。**
 
     ``decisions`` は ``geometry_uid -> final_decision``、
     ``image_decisions`` は ``file_uid -> final_decision``。
     ``pending_as`` / ``uncertain_as`` は override が指定されたときだけ渡す。
     未指定のまま該当が残っていれば呼び出し側で止めるのが前提だが、
     ここでも黙って落とさないよう ``unknown`` として数える。
+
+    書き出しと分けてあるのは、同じ payload を per-dataset の
+    ``development.json`` と統合JSONの両方に使うため。統合側は返ってきた
+    payload の中身を**参照ごと移す**ので、この関数を2回呼んではいけない
+    （元JSONを2回パースすることになり、メモリも時間も倍かかる）。
     """
     raw = source_path.read_bytes()
     before_digest = hashlib.sha256(raw).hexdigest()
     payload = json.loads(raw.decode("utf-8"))
 
-    result = BuildResult(path=out_path)
+    result = BuildResult(path=out_path, source_sha256=before_digest)
     if pending_as:
         result.overrides["pending_as"] = pending_as
     if uncertain_as:
@@ -168,7 +205,20 @@ def build_development_json(
         "overrides": result.overrides,
         **(meta_extra or {}),
     }
+    return payload, result
 
+
+def write_development_json(
+    payload: dict[str, Any],
+    out_path: Path,
+    result: BuildResult,
+    source_path: Path,
+) -> BuildResult:
+    """payload を書き出し、元JSONが変化していないことを確かめる。
+
+    ハッシュ照合は書き出しの**後**に行う。出力先を元JSONと取り違えた場合を
+    捕まえるのが目的なので、書く前に確認しても意味がない。
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -176,7 +226,7 @@ def build_development_json(
 
     # 元JSONを触っていないことをハッシュで確認する。
     after_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    result.original_unchanged = after_digest == before_digest
+    result.original_unchanged = after_digest == result.source_sha256
     if not result.original_unchanged:
         logger.error("元JSONが変化している: %s", source_path)
     return result
@@ -221,6 +271,253 @@ def _tool_version() -> str:
     from .. import __version__
 
     return __version__
+
+
+# ---------------------------------------------------------------- 統合（横断）
+
+#: 統合JSONの file entry に足す唯一のキー。由来データセットを追跡できないと
+#: train/test の別が失われる（PTE/PTR の二重エクスポート問題の再発）。
+DATASET_ID_KEY = "dataset_id"
+
+#: 衝突を記録するときに見る study / series のスカラー属性。
+#: ``series_list`` / ``file_list`` は下の階層なので比較しない。
+_STUDY_SCALARS = ("patient_id", "study_name", "study_date")
+_SERIES_SCALARS = ("spacing", "shape", "manufacturer")
+
+
+class MergeCollision(RuntimeError):
+    """file 単位で衝突した。衝突ゼロが前提なので、黙って上書きしない。"""
+
+
+@dataclass
+class MergeResult:
+    """統合の結果。件数と、解決しなかった属性の食い違い。"""
+
+    datasets: list[str] = field(default_factory=list)
+    institutions: int = 0
+    studies: int = 0
+    series: int = 0
+    files: int = 0
+    annotations: int = 0
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
+    #: study / series の階層を最初に持ち込んだ dataset_id。衝突を記録するとき
+    #: 「どちらのデータセットの値か」を示すのに要る（study/series の dict 自体は
+    #: dataset_id を持たない —— 複数データセットで共有されるため）。
+    owners: dict[str, str] = field(default_factory=dict)
+
+    def as_totals(self) -> dict[str, int]:
+        return {
+            "datasets": len(self.datasets),
+            "institutions": self.institutions,
+            "studies": self.studies,
+            "series": self.series,
+            "files": self.files,
+            "annotations": self.annotations,
+        }
+
+
+def new_merged_payload() -> dict[str, Any]:
+    """統合の accumulator。最初の payload を重ねた時点で version_id が埋まる。"""
+    return {"dataset": {}, "meta_development": {"merged": True, "datasets": {}}}
+
+
+def merge_into(
+    accumulator: dict[str, Any],
+    payload: dict[str, Any],
+    dataset_id: str,
+    result: MergeResult,
+) -> None:
+    """``payload`` を ``accumulator`` へ再帰的に union する。
+
+    **浅い ``dict.update()`` では壊れる。** 実データでは institution が 35個中
+    23個、``(institution, study)`` が 42,690組中 4,274組、``(inst, study, series)``
+    が 42,708組中 4,277組で複数データセットに跨る。上位階層で上書きすると、
+    片方のデータセットにしか無い series / file を取りこぼす（実例:
+    ``ofuna_chuo/CXOFC00003778_002/CXOFC00003778_002_001`` の file_list が
+    2データセットに分かれている）。
+
+    一方 ``(inst, study, series, file_id)`` は 42,574件すべてで衝突しない
+    （``resolve_image_duplicates`` がクロスデータセット重複を解消済みのため）。
+    そこを前提にしているので、衝突したら :class:`MergeCollision` で止める。
+
+    ★移送は**参照の move**で、deepcopy しない。100MB 近い payload を12本ぶん
+    複製するとメモリが持たない。呼び出し側は merge 後に元 payload を捨てること。
+
+    属性の食い違いは値を選ばず ``result.conflicts`` に**両方**記録する。
+    採用値は dataset_id 昇順の先頭（決定的・再現可能）。
+    """
+    result.datasets.append(dataset_id)
+    # version_id / version_date は12本で一致しているのでトップレベルに1つ持つ。
+    for key in ("version_id", "version_date"):
+        if key in payload and key not in accumulator:
+            accumulator[key] = payload[key]
+
+    target = accumulator["dataset"]
+    for institution, studies in (payload.get("dataset") or {}).items():
+        if institution not in target:
+            target[institution] = {}
+        for study_key, study in studies.items():
+            study_path = f"{institution}/{study_key}"
+            existing_study = target[institution].get(study_key)
+            if existing_study is None:
+                target[institution][study_key] = study
+                result.owners[study_path] = dataset_id
+                _tag_files(study, dataset_id, result)
+                continue
+            _record_conflicts(
+                result,
+                level="study",
+                path=study_path,
+                scalars=_STUDY_SCALARS,
+                existing=existing_study,
+                incoming=study,
+                dataset_id=dataset_id,
+            )
+            existing_series = existing_study.setdefault("series_list", {})
+            for series_key, series in (study.get("series_list") or {}).items():
+                series_path = f"{study_path}/{series_key}"
+                current = existing_series.get(series_key)
+                if current is None:
+                    existing_series[series_key] = series
+                    result.owners[series_path] = dataset_id
+                    _tag_series_files(series, dataset_id, result)
+                    continue
+                _record_conflicts(
+                    result,
+                    level="series",
+                    path=series_path,
+                    scalars=_SERIES_SCALARS,
+                    existing=current,
+                    incoming=series,
+                    dataset_id=dataset_id,
+                )
+                _merge_file_list(
+                    current.setdefault("file_list", {}),
+                    series.get("file_list") or {},
+                    dataset_id,
+                    series_path,
+                    result,
+                )
+
+
+def _merge_file_list(
+    target: dict[str, Any],
+    incoming: dict[str, Any],
+    dataset_id: str,
+    path: str,
+    result: MergeResult,
+) -> None:
+    for file_key, file_rec in incoming.items():
+        if file_key in target:
+            raise MergeCollision(
+                f"file entry が衝突した: {path}/{file_key} "
+                f"(dataset_id={dataset_id} と "
+                f"{target[file_key].get(DATASET_ID_KEY)})。"
+                "クロスデータセット重複の解消が効いていない可能性がある"
+            )
+        target[file_key] = _tag_file(file_rec, dataset_id, result)
+
+
+def _tag_files(study: dict[str, Any], dataset_id: str, result: MergeResult) -> None:
+    for series in (study.get("series_list") or {}).values():
+        _tag_series_files(series, dataset_id, result)
+
+
+def _tag_series_files(
+    series: dict[str, Any], dataset_id: str, result: MergeResult
+) -> None:
+    for file_rec in (series.get("file_list") or {}).values():
+        _tag_file(file_rec, dataset_id, result)
+
+
+def _tag_file(
+    file_rec: dict[str, Any], dataset_id: str, result: MergeResult
+) -> dict[str, Any]:
+    file_rec[DATASET_ID_KEY] = dataset_id
+    result.annotations += len(file_rec.get("annotations") or [])
+    return file_rec
+
+
+def _record_conflicts(
+    result: MergeResult,
+    level: str,
+    path: str,
+    scalars: tuple[str, ...],
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    dataset_id: str,
+) -> None:
+    """食い違った属性を記録する。**値は選び直さない。**
+
+    先に入っている方（dataset_id 昇順の先頭）の値をそのまま残し、両方の値を
+    ``conflicts`` に控える。どちらが正かはツールが決められない —— 元データ側の
+    不整合なので、データ管理側へ報告する材料として残すのが正しい扱い。
+    """
+    for name in scalars:
+        if name not in existing and name not in incoming:
+            continue
+        left, right = existing.get(name), incoming.get(name)
+        if left == right:
+            continue
+        for entry in result.conflicts:
+            if entry["path"] == path and entry["field"] == name:
+                entry["values"][dataset_id] = right
+                break
+        else:
+            result.conflicts.append(
+                {
+                    "level": level,
+                    "path": path,
+                    "field": name,
+                    "values": {result.owners.get(path, ""): left, dataset_id: right},
+                    "adopted": result.owners.get(path, ""),
+                    "rule": "dataset_id 昇順の先頭",
+                }
+            )
+
+
+def finalize_merged(
+    accumulator: dict[str, Any],
+    result: MergeResult,
+    per_dataset: Mapping[str, dict[str, Any]],
+    meta_extra: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """統合 payload に meta を載せて仕上げる。
+
+    ``per_dataset`` は dataset_id ごとの ``meta_development``。
+    統合版では単一の件数ではなくデータセット別の内訳を持つ（どの元JSONから
+    何件 keep されたかを追えないと、統合JSONから元へ戻れない）。
+    """
+    result.institutions = len(accumulator["dataset"])
+    result.studies = sum(len(s) for s in accumulator["dataset"].values())
+    result.series = sum(
+        len(study.get("series_list") or {})
+        for studies in accumulator["dataset"].values()
+        for study in studies.values()
+    )
+    result.files = sum(
+        len(series.get("file_list") or {})
+        for studies in accumulator["dataset"].values()
+        for study in studies.values()
+        for series in (study.get("series_list") or {}).values()
+    )
+
+    meta = accumulator["meta_development"]
+    meta["generated_at"] = datetime.now(timezone.utc).isoformat()
+    meta["tool_version"] = _tool_version()
+    meta["datasets"] = dict(per_dataset)
+    meta["totals"] = result.as_totals()
+    meta["conflicts"] = result.conflicts
+    meta.update(meta_extra or {})
+    return accumulator
+
+
+def write_merged_json(payload: dict[str, Any], out_path: Path) -> Path:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return out_path
 
 
 # ------------------------------------------------------ 画像重複の解消（横断）

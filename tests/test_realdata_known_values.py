@@ -342,3 +342,176 @@ def test_画像単位の採否(context, issues):
         dict(collections.Counter(d.image_class for d in image_decisions))
         == EXPECTED_IMAGE_CLASSES
     )
+
+
+# --- 統合JSON（学習パイプライン入力）の実測値
+# 12本の development.json を1本へ union した結果。上位階層は複数データセットで
+# 共有されるが、file 単位は衝突しない（resolve_image_duplicates が効いている）。
+MERGED_TOTALS = {
+    "datasets": 12,
+    "institutions": 35,
+    "studies": 42690,
+    "series": 42708,
+    "files": 42574,
+    "annotations": 17933,
+}
+#: 元データ間で食い違う属性。現状これ1件だけ。
+#: ChestMetry_PI6px_normal は 2020-01-11、
+#: ETR_ChestMetry_PI6px_abnormal_non_pneumothorax は 2019-01-05。
+#: **どちらが正かはツールが決めない。** データ管理側への報告材料として残す。
+MERGED_CONFLICT_PATHS = {"segmed/CXSGM00040183"}
+
+
+@pytest.fixture(scope="module")
+def pipeline_decisions(context, issues):
+    """``select`` と同じ経路で採否を出す。
+
+    モジュール冒頭の ``decisions`` フィクスチャは自動ラダーだけを見るために
+    人間の判定を渡していない。統合JSONは実際の成果物と一致していないと意味が
+    無いので、こちらは正本の目視判定と承認済み override まで含めて再現する。
+    """
+    from segmentation_validation.cli import (
+        _read_review_decisions,
+        _resolve_review_decisions,
+    )
+    from segmentation_validation.selection.image_decisions import (
+        load_image_decision_overrides,
+    )
+
+    config = context.config
+    duplicates, _ = build_automatic_decisions(context.records, context.pairs, config)
+    automatic = merge_automatic(
+        duplicates,
+        build_broken_decisions(issues, config),
+        context.cross_dataset_automatic,
+    )
+    human, human_images = _read_review_decisions(_resolve_review_decisions(config))
+    all_records = (
+        list(context.records)
+        + list(context.out_of_scope)
+        + list(context.cross_dataset_excluded)
+    )
+    decisions = build_decisions(
+        all_records,
+        issues,
+        config,
+        automatic,
+        human,
+        out_of_scope=frozenset(r.annotation_uid for r in context.out_of_scope),
+    )
+    overrides = load_image_decision_overrides(config.image_decision_overrides_path)
+    image_decisions = build_image_decisions(
+        context.groups, issues, config, human_images, overrides
+    )
+    return decisions, image_decisions
+
+
+@pytest.fixture(scope="module")
+def merged(context, pipeline_decisions):
+    """12本を統合した payload。元JSONを1回ずつパースする（約30秒）。"""
+    from segmentation_validation.adapters.engineer_set import dataset_id_for
+    from segmentation_validation.selection import build_dataset as bd
+
+    decisions, image_decisions = pipeline_decisions
+    by_dataset: dict[str, dict[str, str]] = {}
+    for decision in decisions:
+        by_dataset.setdefault(decision.dataset_id, {})[decision.geometry_uid] = (
+            decision.final_decision.value
+        )
+    by_image = {d.file_uid: d.final_decision.value for d in image_decisions}
+
+    dedup = bd.resolve_image_duplicates(
+        [
+            {
+                "file_uid": d.file_uid,
+                "image_path": d.image_path,
+                "dataset_id": d.dataset_id,
+                "source_json": d.source_json,
+            }
+            for d in image_decisions
+        ],
+        [
+            {
+                "file_uid": d.file_uid,
+                "final_decision": d.final_decision.value,
+                "dataset_id": d.dataset_id,
+            }
+            for d in decisions
+        ],
+        by_image,
+    )
+    build_by_image = dict(by_image)
+    for file_uid in dedup.skipped_file_uids:
+        build_by_image[file_uid] = Decision.EXCLUDE.value
+
+    accumulator = bd.new_merged_payload()
+    result = bd.MergeResult()
+    per_dataset: dict[str, dict] = {}
+    for source in context.config.dataset_sources():
+        dataset_id = dataset_id_for(source)
+        payload, _ = bd.build_development_payload(
+            source,
+            by_dataset.get(dataset_id, {}),
+            source.parent / "unused.json",
+            context.config,
+            image_decisions=build_by_image,
+        )
+        bd.merge_into(accumulator, payload, dataset_id, result)
+        per_dataset[dataset_id] = payload["meta_development"]
+    return bd.finalize_merged(accumulator, result, per_dataset), result
+
+
+def test_統合JSONの規模(merged):
+    payload, _ = merged
+    assert payload["meta_development"]["totals"] == MERGED_TOTALS
+
+
+def test_統合JSONのfile単位のキーは衝突しない(merged):
+    """★浅い merge で取りこぼさないことと、file が一意であることの両方を見る。"""
+    payload, _ = merged
+    keys = []
+    for institution, studies in payload["dataset"].items():
+        for study_key, study in studies.items():
+            for series_key, series in (study.get("series_list") or {}).items():
+                for file_key in series.get("file_list") or {}:
+                    keys.append(f"{institution}/{study_key}/{series_key}/{file_key}")
+    assert len(keys) == len(set(keys)) == MERGED_TOTALS["files"]
+
+
+def test_統合JSONの全file_entryにdataset_idが付く(merged):
+    """由来が消えると train/test の別を失う（PTE/PTR の二重エクスポート問題）。"""
+    from segmentation_validation.selection.build_dataset import DATASET_ID_KEY
+
+    found = set()
+    for studies in merged[0]["dataset"].values():
+        for study in studies.values():
+            for series in (study.get("series_list") or {}).values():
+                for rec in (series.get("file_list") or {}).values():
+                    found.add(rec[DATASET_ID_KEY])
+    assert len(found) == MERGED_TOTALS["datasets"]
+
+
+def test_統合JSONのannotation総数はデータセット別keepの合計と一致する(merged):
+    payload, _ = merged
+    meta = payload["meta_development"]
+    assert meta["totals"]["annotations"] == sum(
+        entry["kept"] for entry in meta["datasets"].values()
+    )
+
+
+def test_統合JSONのversionはトップレベルに1つ(merged):
+    """12本すべてで version_id=2.2 / version_date=2026-05-19 が一致している。"""
+    payload, _ = merged
+    assert payload["version_id"] == "2.2"
+    assert payload["version_date"] == "2026-05-19"
+
+
+def test_元データ間の属性の食い違い(merged):
+    """値を選ばず両方を記録する。増えたら元データ側で何か起きている。"""
+    _, result = merged
+    assert {c["path"] for c in result.conflicts} == MERGED_CONFLICT_PATHS
+    conflict = result.conflicts[0]
+    assert conflict["field"] == "study_date"
+    assert len(conflict["values"]) == 2
+    # 採用側は決定的（dataset_id 昇順の先頭）。
+    assert conflict["adopted"] == min(conflict["values"])

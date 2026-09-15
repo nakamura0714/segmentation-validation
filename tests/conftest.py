@@ -152,6 +152,7 @@ def make_group(
     records: tuple[AnnotationRecord, ...] = (),
     *,
     dataset_id: str = DATASET,
+    source_json: str = SOURCE,
     file: str = FILE,
     series: str = SERIES,
     study: str = STUDY,
@@ -162,13 +163,16 @@ def make_group(
     """画像1枚。annotation を持たない画像も作れる（正常例 / 未アノテーション）。
 
     ``dataset_id`` を変えられるのは exclude→keep の一括override（データセット単位で
-    絞り込む）のテスト用。``series_image_index``/``series_image_count`` は
-    「series内の複数ファイルのうち何枚目か」のテスト用（実データでは39件のみだが
-    UNANNOTATED_VIEW をこの位置まで区別する）。
+    絞り込む）のテスト用。``source_json`` を変えられるのは、元JSONの再エクスポート
+    （ファイル名の日時スタンプだけが変わる）で ``file_uid`` は変わるが
+    ``stable_file_uid`` は変わらないことを確かめるため。
+    ``series_image_index``/``series_image_count`` は「series内の複数ファイルのうち
+    何枚目か」のテスト用（実データでは39件のみだが UNANNOTATED_VIEW をこの位置まで
+    区別する）。
     """
     return FileGroup(
         dataset_id=dataset_id,
-        source_json=SOURCE,
+        source_json=source_json,
         institution=INSTITUTION,
         study=study,
         series=series,

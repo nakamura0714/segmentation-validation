@@ -43,7 +43,7 @@ PI6 のセグメンテーションデータセットについて
    │
    │  review build   … 目視用の画像を書き出して FiftyOne に載せる
    │  review launch  … App を開いて目視、判定を入力
-   │  review export  … 判定を review_decisions.json へ
+   │  review export  … 判定を review/review_decisions.json（正本）へ
    │  select         … 採否へ反映（pending が減る）
    ▼
   pending 0 になったら
@@ -150,16 +150,39 @@ selection_decisions.csv : final_decision = keep         ← 開発データに�
 | `issues.json` / `.csv` | プログラムが何を検出したか | 1364（annotation 単位 1144 + 画像単位 220） |
 | **`selection_decisions.json` / `.csv`** | **annotation を開発データに使うか（採否の正本）** | **1817（必ず1 annotation=1行）** |
 | **`image_decisions.json` / `.csv`** | **その画像を開発データに含めるか** | **1083（必ず1画像=1行）** |
-| `review_decisions.json` / `.csv` | 人が何と判断したか | 目視した分だけ |
+| **`review/review_decisions.json`** | **人が何と判断したか（目視判定の正本・git管理）** | 目視した分だけ |
 | `summary.md` | 検出件数・判定不能の理由・参照マスクのカバレッジ・施設別/アノテータ別の偏り | — |
 | `selection_summary.md` | **開発データを作ってよい状態か** | — |
 | `precision.md` | 自動ルールのうち何割が本当に不正だったか | check ごと |
 | `dashboard.html` | 以上をブラウザで辿る（`serve` で常駐配信できる） | — |
 | `development.json` | keep だけを反映した開発用データ | 元JSONと同一スキーマ |
+| **`development_merged.json`** | **12本を1本にまとめた学習パイプライン入力** | 元JSON互換 + file entry に `dataset_id` |
 
 出力先は `output/validation/<fingerprint>/` と `output/development/<dataset>/<version>/`。
 `<fingerprint>` は対象JSONのサイズ・mtime・sha256 から作る
 （`version_id` は3本とも `2.2` なので、それ単独ではキーにできない）。
+
+### 1.7 正本と生成物
+
+`output/` は丸ごと gitignore。**git に置くのは再生成できないものだけ。**
+
+```
+git管理（正本・再生成不可）              自動生成（派生物・再生成可能）
+├─ src/                                  ├─ output/validation/<fp>/issues.json
+├─ review/review_decisions.json  ──▶     ├─ output/validation/<fp>/selection_decisions.csv
+│    目視判定。fingerprint非依存          ├─ output/validation/<fp>/image_decisions.csv
+└─ review_policy/                        ├─ output/validation/<fp>/dashboard.html
+     image_decision_overrides.json       ├─ output/development/<ds>/<ver>/development.json × 12
+     承認済みの exclude→keep ルール       └─ output/development/<ver>/development_merged.json
+```
+
+`output/validation/<fp>/review/review_decisions.json` は正本のスナップショット
+（その時点の写し）で、読み込み元にはしない。詳細は
+[`review/README.md`](review/README.md)。
+
+**fingerprint が変わっても目視結果は引き継がれる。** 突合キーが fingerprint にも
+元JSONのファイル名にも依存しないため（annotation は `dataset_id::geometry_uid`、
+画像は `dataset_id::institution/study/series/file_id`）。
 
 ---
 
@@ -296,7 +319,7 @@ uv run segmentation-validation select
 
 → `selection_decisions.csv`（1817行）と `image_decisions.csv`（1083行）。
 
-初回は `review_decisions.json` が無いので、目視対象は `pending` のままになる。それが正しい。
+初回は目視判定がまだ無いので、目視対象は `pending` のままになる。それが正しい。
 
 ### 3.5 結果を見る
 
@@ -380,11 +403,11 @@ nohup uv run segmentation-validation \
 主なオプション: `--port` / `--host` / `--no-refresh`（閲覧専用にする）。
 ポートが埋まっていれば掴んでいるプロセスの PID を出して exit 2 で止まる。
 
-> **fingerprint が変わると目視判定は引き継がれない。** データセットを1本足すと
-> 出力先が別ディレクトリになり、`review/review_decisions.json` も新しい空の場所を
-> 指す。`serve` は状態表示に「設定が指す fingerprint」「配信中の fingerprint」
-> 「人間の判定の件数」を出すので、0件になっていれば気づける。
-> 引き継ぎ手順は [docs/review_procedure.md](docs/review_procedure.md) 5.3。
+> **fingerprint が変わっても目視判定は引き継がれる。** 正本は fingerprint に
+> 依存しない `review/review_decisions.json`（git 管理）にあり、突合キーも
+> fingerprint と元JSONのファイル名のどちらにも依存しない。`serve` は状態表示に
+> 「設定が指す fingerprint」「配信中の fingerprint」「人間の判定の件数」を出すので、
+> 想定と違えば気づける。詳細は [review/README.md](review/README.md)。
 
 #### 表示する fingerprint を選ぶ
 
@@ -449,7 +472,7 @@ uv run segmentation-validation --set review.export_all_files=true review build
 
 > ★**`review build` の前に必ず `review export` する。**
 > `review build` は FiftyOne dataset を作り直すので、**export していない判定は消える**。
-> 判定の正本は `review_decisions.json` であって DB ではない。
+> 判定の正本は `review/review_decisions.json`（git 管理）であって DB ではない。
 > 消える判定があるときは**停止する**ので、指示どおり `review export` してから
 > やり直せばよい（捨ててよいなら `review build --discard-unexported`）。
 
@@ -517,7 +540,7 @@ ssh -L 5151:localhost:5151 pi6
 ### 3.8 判定を採否へ反映する
 
 ```bash
-uv run segmentation-validation review export   # → review_decisions.json / .csv
+uv run segmentation-validation review export   # → review/review_decisions.json（正本・git管理）
 uv run segmentation-validation select          # → 採否へ反映（pending が減る）
 uv run segmentation-validation review status   # 進捗
 uv run segmentation-validation review precision  # → precision.md
@@ -535,7 +558,7 @@ review launch →（目視）→ review export → select → report
 ```bash
 uv run segmentation-validation review export    # ★先に必ず export
 uv run segmentation-validation review build     # DB 再構築（export 済みなら安全）
-uv run segmentation-validation review import    # review_decisions.json から判定を復元
+uv run segmentation-validation review import    # 正本から判定を復元
 ```
 
 往復は実機で確認済み。4 annotation・2画像の判定を入れて
@@ -562,7 +585,57 @@ uv run segmentation-validation build-dataset \
 override を使うと `development.json` の meta と `selection_summary.md` に記録される。
 
 → `output/development/<dataset>/<version>/development.json` と
-`output/development/<version>/selection_summary.md`。
+`output/development/<version>/selection_summary.md`、そして
+`output/development/<version>/development_merged.json`（統合JSON）。
+
+#### 統合JSON（学習パイプライン入力）
+
+12本の `development.json` を1本へまとめたもの。**元JSONと同じスキーマ**のまま、
+各 file entry に由来を示す `dataset_id` を1つ足しただけ。
+
+```json
+"file_list": {
+  "CXSGM00040183_003_000_000": {
+    "dataset_id": "ChestMetry_PI6px_normal",
+    "image_path": "medical2/...",
+    "annotations": [ ... ]
+  }
+}
+```
+
+`dataset_id` を file entry に置くのは、**file 単位が衝突しない唯一の階層**だから。
+実測では institution が 35個中23個、`(institution, study)` が 42,690組中4,274組、
+`(inst, study, series)` が 42,708組中4,277組で複数データセットに跨る。一方
+`(inst, study, series, file_id)` は 42,574件すべてで衝突しない
+（`resolve_image_duplicates` がクロスデータセット重複を解消済みのため）。
+上位階層に `dataset_id` を置くと train/test の由来を表現できない。
+
+統合は4階層を**再帰的に union** する。浅い `dict.update()` だと、同じ series の下で
+データセットごとに別の file_id を持つケース（実在する）を取りこぼす。
+
+`meta_development` にはデータセット別の内訳（`source_sha256` 込み）と `totals`、
+そして元データ間で食い違った属性が入る。
+
+```json
+"conflicts": [
+  {"level": "study", "path": "segmed/CXSGM00040183", "field": "study_date",
+   "values": {"ChestMetry_PI6px_normal": "2020-01-11 00:00:00+00:00",
+              "ETR_ChestMetry_PI6px_abnormal_non_pneumothorax": "2019-01-05 00:00:00+00:00"},
+   "adopted": "ChestMetry_PI6px_normal", "rule": "dataset_id 昇順の先頭"}
+]
+```
+
+**どちらが正しいかツールは決めない。** 両方の値を残し、採用値は決定的な規則
+（dataset_id 昇順の先頭）で選ぶ。元データ側の不整合なので、`selection_summary.md`
+に毎回出してデータ管理側への報告材料にする。現状この1件だけ。
+
+| オプション | 効果 |
+|---|---|
+| `--no-merged` | 統合JSONを作らない（既定は作る） |
+| `--merged-name NAME` | ファイル名を変える（既定 `development_merged.json`） |
+| `--strict-conflicts` | 属性の食い違いがあれば停止する（CI 向け） |
+
+規模は raw 約 100MB。生成に約30秒、ピークメモリ約 1.9GB。
 
 **生成物の不変条件**（実測で確認済み）:
 
@@ -570,6 +643,10 @@ override を使うと `development.json` の meta と `selection_summary.md` に
 - `file_list` のエントリ数 == 元JSON −（画像単位で落とした枚数）
 - `meta_development` に元JSONの **sha256**・fingerprint・ツール版・override が入る
 - **元JSONの sha256 は生成前後で変わらない**（`build-dataset` が毎回照合する）
+- 統合JSONの annotation 総数 == 12本の `development.json` の keep 合計
+  （採否サマリの keep 件数との差は、クロスデータセット画像重複で統合時に
+  skip した分。`image_duplicates.csv` を参照）
+- 統合JSONの `(inst, study, series, file_id)` は全件一意。衝突したら**止まる**
 
 ### 3.10 単一症例の重畳図（debug 用）
 
@@ -1241,5 +1318,6 @@ gui                                         dashboard.html
 serve                                       dashboard.html を常駐サーバーで配信（更新ボタンつき）
 review build / launch / status              目視レビュー
 review export / import / precision          判定の往復と答え合わせ
-build-dataset                               development.json
+review migrate-decisions                    目視判定を git 管理の正本へ移す（移行時に一度）
+build-dataset                               development.json × 12 + development_merged.json
 ```

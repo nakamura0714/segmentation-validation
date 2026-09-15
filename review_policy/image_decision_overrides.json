@@ -1,0 +1,23 @@
+{
+  "overrides": [
+    {
+      "id": "2026-09-14-unannotated-orphan-keep",
+      "match": {
+        "dataset_id": [
+          "ChestMetry_PI6px_normal",
+          "ANN_EIRLPRJ_01331",
+          "ANN_EIRLPRJ_01333",
+          "ANN_EIRLPRJ_01334",
+          "ANN_EIRLPRJ_01336",
+          "PTE_CX_MT_PI3_pneumothorax"
+        ],
+        "auto_decision_reason": ["unannotated_orphan_unused"],
+        "image_class": ["unannotated_orphan"]
+      },
+      "action": "keep",
+      "approved_by": "kosuke.nakamura@lpixel.net",
+      "approved_at": "2026-09-14T00:00:00+00:00",
+      "note": "ETR_ChestMetry_PI6px_abnormal_non_pneumothoraxを除く、未アノテーション孤立画像をkeepへ復帰。スポットチェックは今回省略"
+    }
+  ]
+}

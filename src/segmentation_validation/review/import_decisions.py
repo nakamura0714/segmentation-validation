@@ -11,12 +11,12 @@ manifest は ``select`` が反映済みの採否を持つので、通常はそ�
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from ..config import Config
+from . import decision_store
 from .fiftyone_builder import configure_database
 from .review_schema import (
     FIELD_FINAL,
@@ -40,17 +40,24 @@ def import_decisions(path: Path, config: Config) -> dict[str, int]:
     configure_database(config)
     import fiftyone as fo
 
-    payload = json.loads(path.read_text(encoding="utf-8"))
     # annotation は (dataset_id, geometry_uid) で突合する。geometry_uid は
     # cross-dataset 重複でデータセットをまたいで再利用されるため、bare
     # geometry_uid だけで突合すると無関係な別データセットの annotation に
     # 判定が誤って書き戻される。dataset_id を持たない旧形式の行は無視する。
+    #
+    # 画像は stable_file_uid（dataset_id + inst/study/series/file）で突合する。
+    # 旧形式の file_uid は decision_store が読み込み時に昇格する。
+    rows = decision_store.load_rows(path)
     by_uid = {
-        (d["dataset_id"], d["geometry_uid"]): d
-        for d in payload.get("decisions", [])
-        if d.get("dataset_id")
+        (row["dataset_id"], row["key"]): row
+        for row in rows
+        if row["kind"] == decision_store.KIND_ANNOTATION and row.get("dataset_id")
     }
-    by_file = {d["file_uid"]: d for d in payload.get("image_decisions", [])}
+    by_file = {
+        decision_store.stable_uid(row): row
+        for row in rows
+        if row["kind"] == decision_store.KIND_IMAGE
+    }
 
     name = config.review.dataset_name
     if name not in fo.list_datasets():
@@ -59,13 +66,16 @@ def import_decisions(path: Path, config: Config) -> dict[str, int]:
 
     applied = {"annotations": 0, "images": 0}
     for sample in dataset.iter_samples(autosave=True, progress=False):
-        verdict = by_file.get(sample.file_uid)
+        # ★dataset_id は Sample 側のフィールド。Detection には無い。
+        dataset_id = sample.get_field("dataset_id") or ""
+
+        parts = decision_store.split_file_uid(sample.file_uid)
+        image_uid = f"{dataset_id}::{parts[1]}" if parts else sample.file_uid
+        verdict = by_file.get(image_uid)
         if verdict is not None:
             _apply(sample, verdict)
             applied["images"] += 1
 
-        # ★dataset_id は Sample 側のフィールド。Detection には無い。
-        dataset_id = sample.get_field("dataset_id") or ""
         detections = sample.get_field(FIELD_FINAL)
         for detection in detections.detections if detections else []:
             uid = detection.get_field("geometry_uid")

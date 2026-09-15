@@ -161,10 +161,11 @@ def test_画像単位のexcludeはannotationのexcludeと別に数える(config)
     groups = [make_group((annotated,)), unannotated]
     decisions = build_decisions([annotated], [], config)
     # 未アノテーションのビューを目視で除外した状態（実データの33枚がこれ）。
-    # 画像の human decision は file_uid で引く。
+    # 画像の human decision は stable_file_uid で引く（file_uid は source_json を
+    # 含むため、元JSONを再エクスポートすると引き当てられなくなる）。
     human = {
-        unannotated.file_uid: HumanDecision(
-            geometry_uid=unannotated.file_uid,
+        unannotated.stable_file_uid: HumanDecision(
+            geometry_uid=unannotated.stable_file_uid,
             decision=Decision.EXCLUDE,
             reason="review_required",
         )

@@ -146,8 +146,8 @@ def test_人間の判定が画像の採否に反映される(config):
     """側面像と判定したら画像ごと落とす。"""
     group = make_group(())
     human = {
-        group.file_uid: HumanDecision(
-            geometry_uid=group.file_uid,
+        group.stable_file_uid: HumanDecision(
+            geometry_uid=group.stable_file_uid,
             decision=Decision.EXCLUDE,
             reason="lateral_view",
             reviewer="me@example.com",
@@ -233,8 +233,8 @@ def test_人間判定はoverrideで上書きされない(config):
     黙って上書きしないこと。"""
     group = make_group(())
     human = {
-        group.file_uid: HumanDecision(
-            geometry_uid=group.file_uid,
+        group.stable_file_uid: HumanDecision(
+            geometry_uid=group.stable_file_uid,
             decision=Decision.EXCLUDE,
             reason="lateral_view",
             reviewer="me@example.com",

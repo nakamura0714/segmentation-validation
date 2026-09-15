@@ -245,6 +245,10 @@ def build_image_decisions(
     上記で決まった結果が**機械の自動exclude（3番、``DecisionSource.DEFAULT``）**の
     ときだけ、``overrides``（データ管理者が承認した一括ルール）に一致すれば
     ``keep`` へ引き上げる。人間判定（1番）には絶対に適用しない。
+
+    ``human`` のキーは ``FileGroup.stable_file_uid``（``dataset_id::inst/study/
+    series/file``）。出力行の主キーである ``file_uid`` ではない点に注意 ——
+    ``file_uid`` は source_json のファイル名を含み、再エクスポートで変わる。
     """
     human = human or {}
     overrides = overrides or []
@@ -269,7 +273,10 @@ def build_image_decisions(
         ]
         needs_review = bool(detected) and image_class.value in review_classes
 
-        verdict = human.get(group.file_uid)
+        # ★ human のキーは stable_file_uid。file_uid は source_json（日時スタンプ
+        # 込みのファイル名）を含むため、元JSONを再エクスポートすると人間の判定が
+        # 全件引き当て不能になり、目視済みの画像が pending へ戻る。
+        verdict = human.get(group.stable_file_uid)
         if verdict is not None:
             decision = verdict.decision
             reason = verdict.reason or decision.value

@@ -164,6 +164,12 @@ def test_manifestが無ければreviewerだけで判断する():
 
 
 def test_export済みのキーを読める(tmp_path):
+    """画像のキーは dataset_id + inst/study/series/file。
+
+    旧形式（``file_uid``）で書かれていても、``source_json`` を dataset_id へ
+    畳んで同じキーになる。これが無いと再エクスポートのたびに画像側の判定が
+    「未 export」に見えて `review build` が止まる。
+    """
     path = tmp_path / "review_decisions.json"
     path.write_text(
         json.dumps(
@@ -175,7 +181,13 @@ def test_export済みのキーを読める(tmp_path):
                         "decision": "keep",
                     }
                 ],
-                "image_decisions": [{"file_uid": "IMG", "decision": "exclude"}],
+                "image_decisions": [
+                    {
+                        "file_uid": f"engineer-set-{DATASET_ID}-20260624_080014.json"
+                        "::inst/study/series/file",
+                        "decision": "exclude",
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -183,7 +195,7 @@ def test_export済みのキーを読める(tmp_path):
 
     assert _exported_keys(path) == {
         ("annotation", DATASET_ID, "A"),
-        ("image", "", "IMG"),
+        ("image", DATASET_ID, "inst/study/series/file"),
     }
 
 

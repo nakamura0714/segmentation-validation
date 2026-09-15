@@ -18,6 +18,7 @@ DB を消しても、過去の目視の成果を失わない。**目視は一番
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import numpy as np
@@ -40,6 +41,16 @@ pytestmark = pytest.mark.fiftyone
 
 DATASET_NAME = "pytest-roundtrip"
 REVIEWER = "pytest@example.com"
+
+
+def image_row_key(manifest_image: dict) -> str:
+    """``collect_decisions`` が画像行に使うキー。
+
+    ``file_uid`` は ``source_json::inst/study/series/file`` だが、``source_json``
+    は日時スタンプ込みのファイル名なので再エクスポートで変わる。突合キーには
+    ``dataset_id``（行の別カラム）と**パス部分だけ**を使う。
+    """
+    return manifest_image["file_uid"].split("::", 1)[1]
 
 
 @pytest.fixture(scope="module")
@@ -227,7 +238,7 @@ def test_人間の判定だけがexportされる(built, review_config, synthetic
 
     assert {(r["kind"], r["key"]) for r in rows} == {
         ("annotation", "A"),
-        ("image", synthetic["images"][1]["file_uid"]),
+        ("image", image_row_key(synthetic["images"][1])),
     }
     assert all(r["reviewer"] == REVIEWER for r in rows)
 
@@ -278,6 +289,56 @@ def test_DBを消して再構築してimportすると判定が戻る(
 
     # ★auto: タグは再構築で貼り直されている。
     assert "auto:s05_outside_body" in by_uid["A"].tags
+
+
+def test_再エクスポートで元JSONの名前が変わっても判定が戻る(
+    built, review_config, synthetic, tmp_path
+):
+    """★fingerprint が変わっただけで目視結果が pending へ戻らないこと。
+
+    元JSONを再エクスポートすると ``source_json`` の日時スタンプが変わり、
+    ``file_uid`` は全画像ぶん別物になる。以前は画像側の判定がこの ``file_uid``
+    をキーにしていたため、**1件も引き当てられなくなっていた**（しかも書き出しは
+    追記マージで行が残るので「件数はあるのに適用されない」状態になる）。
+
+    ここでは export したあと、別のファイル名で作り直した manifest に対して
+    import し、画像・annotation の両方の判定が戻ることを確かめる。
+    """
+    import fiftyone as fo
+
+    from segmentation_validation.review.export_decisions import (
+        collect_decisions,
+        write_decisions,
+    )
+    from segmentation_validation.review.fiftyone_builder import build_dataset
+    from segmentation_validation.review.import_decisions import import_decisions
+
+    input_judgments(built)
+    path = tmp_path / "review_decisions.json"
+    write_decisions(path, collect_decisions(review_config, synthetic), review_config)
+
+    # 再エクスポート: dataset_id はそのまま、source_json の日時だけが変わる。
+    reexported = json.loads(json.dumps(synthetic))
+    for image in reexported["images"]:
+        rest = image["file_uid"].split("::", 1)[1]
+        image["file_uid"] = f"engineer-set-SYNTH-20260709_004526.json::{rest}"
+
+    fo.delete_dataset(DATASET_NAME)
+    build_dataset(reexported, review_config)
+    counts = import_decisions(path, review_config)
+
+    # ★画像側が 0 になっていたのが直した対象。
+    assert counts == {"annotations": 1, "images": 1}
+
+    restored = fo.load_dataset(DATASET_NAME)
+    images = {s["file_id"]: s for s in restored}
+    assert images["F2"]["review_status"] == Decision.EXCLUDE.value
+    by_uid = {
+        det["geometry_uid"]: det
+        for sample in restored
+        for det in (sample["final"].detections if sample["final"] else [])
+    }
+    assert by_uid["A"]["review_status"] == Decision.EXCLUDE.value
 
 
 def test_importしてもautoタグは残る(built, review_config, synthetic, tmp_path):
@@ -358,7 +419,7 @@ def test_export前の判定はunexportedとして検出される(
     lost = unexported_human_decisions(review_config, synthetic, tmp_path / "none.json")
     assert {(r["kind"], r["key"]) for r in lost} == {
         ("annotation", "A"),
-        ("image", synthetic["images"][1]["file_uid"]),
+        ("image", image_row_key(synthetic["images"][1])),
     }
 
 
@@ -623,7 +684,7 @@ def test_理由が区切りつきでexportされる(built, review_config, synthe
     rows = {(r["kind"], r["key"]): r for r in collected}
 
     assert rows[("annotation", "A")]["reason"] == "invalid_duplicate|older_duplicate"
-    image_key = synthetic["images"][1]["file_uid"]
+    image_key = image_row_key(synthetic["images"][1])
     assert rows[("image", image_key)]["reason"] == "lateral_view"
 
 

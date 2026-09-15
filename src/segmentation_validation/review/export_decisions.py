@@ -4,8 +4,10 @@
 
     FiftyOne DB削除 -> dataset再構築 -> review_decisions.json import -> 判定が戻る
 
-キーは ``geometry_uid``（annotation）と ``file_uid``（画像）。どちらも全域一意なので、
-新しいJSONが追加されて再スキャンしても対応が壊れない。
+突合キーは annotation が ``dataset_id`` + ``geometry_uid``、画像が ``dataset_id`` +
+``institution/study/series/file_id``。どちらも元JSONの再エクスポート（ファイル名の
+日時スタンプだけが変わる）を跨いで不変で、新しいJSONが追加されて fingerprint が
+変わっても対応が壊れない。書き出し先は ``review/decision_store.py`` が持つ正本。
 
 判定の読み取りは **``review_status`` フィールドを正**とし、``review:`` タグは
 フィルタ用の写しとして扱う。タグは文字列の集合で取り違えやすいため。
@@ -23,13 +25,13 @@ reviewer に依存しないのは、名前の入力を忘れても判定は有�
 from __future__ import annotations
 
 import csv
-import json
 import logging
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..config import Config
+from . import decision_store
+from .decision_store import split_file_uid
 from .fiftyone_builder import configure_database
 from .review_schema import (
     DECIDED,
@@ -49,16 +51,23 @@ from .review_schema import effective_status as _effective_status
 
 logger = logging.getLogger(__name__)
 
-COLUMNS = (
+#: 後方互換のための再エクスポート。列の正本は ``decision_store.COLUMNS``。
+COLUMNS = decision_store.COLUMNS
+
+#: ``flagged_for_report.csv`` の列。採否とは別軸のレポート専用出力なので
+#: ``review_decisions`` とは別の並び（実ファイルパスを含む）。
+FLAGGED_COLUMNS = (
     "kind",
-    # ★dataset_id: geometry_uid は cross-dataset で重複するため突合キーの一部
     "dataset_id",
     "key",
-    "decision",
-    "reason",
-    "reviewer",
-    "reviewed_at",
-    "comment",
+    "institution",
+    "patient_id",
+    "study",
+    "series",
+    "file_id",
+    "image_path",
+    "path_mask",
+    "path_original_mask",
 )
 
 
@@ -117,13 +126,26 @@ def collect_decisions(
         status = _effective_status(
             sample.get_field(FIELD_REVIEW_STATUS), list(sample.tags or [])
         )
-        row = _row("image", sample.file_uid, status, sample)
+        dataset_id = _optional(sample, "dataset_id") or ""
+        # ★画像の突合キーは stable_file_uid（dataset_id + inst/study/series/file）。
+        # file_uid は source_json（日時スタンプ込みのファイル名）を含むため、
+        # 元JSONを再エクスポートすると判定が全件引き当て不能になる。
+        # baseline（manifest 側）は同一 fingerprint 内の突合なので file_uid のまま。
+        parts = split_file_uid(sample.file_uid)
+        image_key = parts[1] if parts else sample.file_uid
+        row = _row(
+            "image",
+            image_key,
+            status,
+            sample,
+            dataset_id=dataset_id,
+            legacy_file_uid=sample.file_uid,
+        )
         if status in DECIDED and _is_human(
             row, baseline_img.get(sample.file_uid), manifest
         ):
             rows.append(row)
 
-        dataset_id = _optional(sample, "dataset_id") or ""
         detections = sample.get_field(FIELD_FINAL)
         for detection in detections.detections if detections else []:
             uid = detection.get_field("geometry_uid")
@@ -191,126 +213,25 @@ def human_decisions_in_db(config: Config) -> list[dict[str, Any]]:
     return collect_decisions(config, manifest=None)
 
 
-def write_decisions(path: Path, rows: list[dict[str, Any]], config: Config) -> None:
-    """``rows``（今回スキャンできた人間の判定）を既存ファイルとマージして書く。
+def write_decisions(
+    path: Path, rows: list[dict[str, Any]], config: Config
+) -> list[dict[str, Any]]:
+    """``rows``（今回スキャンできた人間の判定）を正本へマージして書く。
 
     ``review build``（``--all`` 無し）は pending の無い画像/annotationを
     FiftyOne から除外するため、一度確定した判定が次の ``collect_decisions``
     のスキャン範囲から外れて見えなくなることがある。見えなくなったからと
     いって判定が無効になったわけではないので、**上書きしない**。
-    既存ファイルにしか無いキーはそのまま残し、両方にあるキーは今回スキャン
-    した方（＝より新しい状態）を優先する。これでモジュール冒頭の docstring
-    にある不変条件（DB削除→再構築→import で判定が戻る）を rebuild を挟んでも
-    保てる。
+    既存ファイルにしか無いキーはそのまま残す。
 
-    annotation の突合キーは ``(dataset_id, geometry_uid)``。geometry_uid は
-    cross-dataset 重複でデータセットをまたいで再利用されるため、bare
-    geometry_uid だけで突合すると別データセットの判定を上書きしてしまう。
+    実体は :mod:`segmentation_validation.review.decision_store`。突合キーと
+    スキーマの面倒はすべてそちらが見る（fingerprint 非依存の正本と、
+    fingerprint 配下のスナップショットで同じ規則を使うため）。
+
+    戻り値はマージ後の全行（今回スキャンできなかった既存の判定も含む）。
+    呼び出し側がスナップショットを書くのに使う。
     """
-    merged: dict[tuple[str, str, str], dict[str, Any]] = {
-        _merge_key(row): row for row in _read_existing_rows(path)
-    }
-    for row in rows:
-        merged[_merge_key(row)] = row
-    all_rows = list(merged.values())
-
-    payload = {
-        "meta": {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "dataset_name": config.review.dataset_name,
-            "n_annotations": sum(1 for r in all_rows if r["kind"] == "annotation"),
-            "n_images": sum(1 for r in all_rows if r["kind"] == "image"),
-        },
-        # ``select`` が読む形。annotation は dataset_id + geometry_uid、
-        # 画像は file_uid がキー。
-        "decisions": [
-            {
-                "dataset_id": r["dataset_id"],
-                "geometry_uid": r["key"],
-                "decision": r["decision"],
-                "reason": r["reason"],
-                "reviewer": r["reviewer"],
-                "reviewed_at": r["reviewed_at"],
-                "comment": r["comment"],
-            }
-            for r in all_rows
-            if r["kind"] == "annotation"
-        ],
-        "image_decisions": [
-            {
-                "file_uid": r["key"],
-                "decision": r["decision"],
-                "reason": r["reason"],
-                "reviewer": r["reviewer"],
-                "reviewed_at": r["reviewed_at"],
-                "comment": r["comment"],
-            }
-            for r in all_rows
-            if r["kind"] == "image"
-        ],
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    csv_path = path.with_suffix(".csv")
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=COLUMNS)
-        writer.writeheader()
-        for row in all_rows:
-            writer.writerow(row)
-
-
-def _read_existing_rows(path: Path) -> list[dict[str, Any]]:
-    """既存の ``review_decisions.json`` を ``collect_decisions`` と同じ行の形へ戻す。
-
-    マージ前提の読み戻しなので、読めない/無い場合は空扱いにする
-    （``_exported_keys`` と同じ防御）。
-    """
-    if not path.exists():
-        return []
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        logger.warning("%s を読めない。既存の判定は無いものとして扱う", path)
-        return []
-
-    def to_row(
-        kind: str, key_field: str, d: dict[str, Any], dataset_id: str | None = None
-    ) -> dict[str, Any]:
-        return {
-            "kind": kind,
-            "key": d[key_field],
-            "dataset_id": d.get("dataset_id") if dataset_id is None else dataset_id,
-            "decision": d["decision"],
-            "reason": d.get("reason", ""),
-            "reviewer": d.get("reviewer", ""),
-            "reviewed_at": d.get("reviewed_at", ""),
-            "comment": d.get("comment", ""),
-        }
-
-    rows = [
-        to_row("annotation", "geometry_uid", d) for d in payload.get("decisions", [])
-    ]
-    rows += [
-        to_row("image", "file_uid", d, dataset_id=None)
-        for d in payload.get("image_decisions", [])
-    ]
-    return rows
-
-
-FLAGGED_COLUMNS = (
-    "kind",
-    "dataset_id",
-    "key",
-    "institution",
-    "patient_id",
-    "study",
-    "series",
-    "file_id",
-    "image_path",
-    "path_mask",
-    "path_original_mask",
-)
+    return decision_store.write_rows(path, rows, config.review.dataset_name)
 
 
 def collect_flagged(config: Config) -> list[dict[str, Any]]:
@@ -419,32 +340,13 @@ def write_flagged_report(path: Path, rows: list[dict[str, Any]]) -> int:
 
 
 def _merge_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    """``write_decisions`` のマージ/突合キー。
-
-    annotation は geometry_uid が cross-dataset 重複でデータセットをまたいで
-    再利用されるため、``dataset_id`` を含めないと別データセットの判定を
-    上書きしてしまう。画像（kind="image"）は file_uid が全域一意なので
-    dataset_id 部分は空文字で揃える。
-    """
-    return (row["kind"], row.get("dataset_id") or "", row["key"])
+    """マージ/突合キー。annotation も画像も ``dataset_id`` を含める。"""
+    return decision_store.row_key(row)
 
 
 def _exported_keys(path: Path) -> set[tuple[str, str, str]]:
-    """``review_decisions.json`` に既に書き出されている判定のキー。"""
-    if not path.exists():
-        return set()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # 読めないファイルを「全部 export 済み」と解釈してはいけない。
-        logger.warning("%s を読めない。未 export 扱いにする", path)
-        return set()
-    keys = {
-        ("annotation", d.get("dataset_id") or "", d["geometry_uid"])
-        for d in payload.get("decisions", [])
-    }
-    keys |= {("image", "", d["file_uid"]) for d in payload.get("image_decisions", [])}
-    return keys
+    """正本に既に書き出されている判定のキー。"""
+    return decision_store.exported_keys(path)
 
 
 def _baseline(
@@ -504,6 +406,7 @@ def _row(
     status: str,
     holder: Any,
     dataset_id: str | None = None,
+    legacy_file_uid: str = "",
 ) -> dict[str, Any]:
     # 理由は「review_reasons フィールド → reason: タグ → 自由記述」の順に見て、
     # **機械の理由は捨てる**。manifest が初期値として流し込んだ review_required が
@@ -517,13 +420,17 @@ def _row(
     return {
         "kind": kind,
         "key": key,
-        # annotation のみ意味を持つ（cross-dataset 重複で geometry_uid が
-        # データセットをまたいで再利用されるため、merge/lookup は dataset_id を
-        # 含めて行う）。画像側（kind="image"）は file_uid が全域一意なので None。
+        # annotation / 画像のどちらも dataset_id を突合キーに含める。
+        # annotation は geometry_uid が cross-dataset 重複でデータセットを
+        # またいで再利用されるため。画像は key が inst/study/series/file だけで
+        # データセット間で重複しうるため（同じDICOMが複数データセットに登録
+        # されている実例が 4,298 件ある）。
         "dataset_id": dataset_id,
         "decision": status,
         "reason": join_reasons(reasons),
         "reviewer": str(holder.get_field(FIELD_REVIEWER) or ""),
         "reviewed_at": str(holder.get_field(FIELD_REVIEWED_AT) or ""),
         "comment": str(holder.get_field(FIELD_REVIEW_COMMENT) or ""),
+        # 移行の追跡用。突合には使わない。
+        "legacy_file_uid": legacy_file_uid,
     }

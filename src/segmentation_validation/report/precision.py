@@ -15,7 +15,6 @@ FiftyOne の DB は見ない（正本にしないという方針の一部）。
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,14 +67,19 @@ def compute_precision(
 ) -> list[CheckPrecision]:
     """check_id ごとに Precision を出す。
 
-    ``verdicts`` は ``geometry_uid -> decision``（人間の判定のみ）。
+    ``verdicts`` は ``annotation_uid -> decision``（人間の判定のみ）。
     自動判定を混ぜてはいけない —— 混ぜると「機械が機械を採点する」ことになる。
+
+    ★キーは bare ``geometry_uid`` ではなく ``dataset_id::geometry_uid``。
+    geometry_uid は cross-dataset 重複でデータセットをまたいで再利用される
+    実例があり（D05 参照）、bare で引くと別データセットの annotation の判定が
+    別データセットの検出に帰属して Precision が歪む。
     """
     detected: dict[str, set[str]] = {}
     for issue in issues:
-        uid = issue.geometry_uid
-        if uid is None:
+        if issue.geometry_uid is None:
             continue
+        uid = f"{issue.dataset_id}::{issue.geometry_uid}"
         # 目視対象にならなかった検出は Precision の対象外
         # （記録のみ・判定不能は人間が判定していないので分母に入らない）。
         if not effective_review_required(issue.check_id, issue.status, config):
@@ -103,11 +107,19 @@ def compute_precision(
 
 
 def read_verdicts(path: Path) -> dict[str, str]:
-    """``review_decisions.json`` から人間の判定だけを読む。"""
-    if not path.exists():
-        return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    return {d["geometry_uid"]: d["decision"] for d in payload.get("decisions", [])}
+    """目視判定の正本から人間の判定だけを読む。
+
+    キーは ``annotation_uid``（``dataset_id::geometry_uid``）。dataset_id を
+    持たない旧形式の行は、どのデータセットの判定か決められないので捨てる
+    （``select`` と同じ方針。誤って別データセットに帰属させない）。
+    """
+    from ..review import decision_store as store
+
+    return {
+        store.annotation_key(row["dataset_id"], row["key"]): row["decision"]
+        for row in store.load_rows(path)
+        if row["kind"] == store.KIND_ANNOTATION and row.get("dataset_id")
+    }
 
 
 def write_precision(

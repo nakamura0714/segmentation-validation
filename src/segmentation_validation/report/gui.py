@@ -450,12 +450,11 @@ def _precision_block(issues: Sequence[Issue], config: Config) -> dict[str, Any]:
     """自動ルールの Precision。目視前は分母だけが埋まる。"""
     from .precision import compute_precision, read_verdicts, summarize
 
-    review = config.validation_dir / "review" / "review_decisions.json"
-    # fingerprint 配下が正だが、無ければ空で計算する（目視前は0件）。
-    for candidate in config.validation_dir.glob("*/review/review_decisions.json"):
-        review = candidate
-        break
-    verdicts = read_verdicts(review)
+    # 目視判定の正本（fingerprint 非依存）を読む。
+    # 以前は validation_dir を glob して最初に見つかった1件を使っていたが、
+    # glob 順は OS 依存で、表示中の構成と無関係な fingerprint の判定を拾って
+    # Precision が実態とずれていた。無ければ空で計算する（目視前は0件）。
+    verdicts = read_verdicts(config.review_decisions_path)
     results = compute_precision(issues, verdicts, config)
     return {
         "summary": summarize(results),

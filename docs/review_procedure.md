@@ -364,26 +364,43 @@ segmentation-validation --set "$EX" gui
 
 #### 過去の目視結果を引き継ぐ
 
-**旧 fingerprint の `review_decisions.json` を新しい方へコピーするのが一番事故が
-少ない。**
+**何もしなくてよい。** 目視判定の正本は fingerprint に依存しない
+`review/review_decisions.json`（git 管理）にあり、`select` はそこから読む。
+データセットを足しても、symlink が張り替わっても、元JSONを再エクスポートしても
+判定は引き継がれる。
+
+突合キーは fingerprint と元JSONのファイル名のどちらにも依存しない。
+
+| 対象 | キー | 変わらない理由 |
+|---|---|---|
+| annotation | `dataset_id::geometry_uid` | `dataset_id_for()` がファイル名末尾の `-YYYYMMDD_HHMMSS` を落とす |
+| 画像 | `dataset_id::institution/study/series/file_id` | 同上。`source_json` を含めない |
+
+`output/validation/<fp>/review/review_decisions.json` は正本のスナップショット
+（その時点の写し）で、読み込み元にはしない。
+
+> **注意: `dataset_id` が変わると引き継げない。** 元JSONのファイル名が日時以外の
+> 部分で変わった場合がこれにあたる。`review status` が「現在の構成に当たらない
+> 判定」として件数と例を出すので、そこで気づける。判定は消さずに残る。
+
+まだ移行していないリポジトリなら、一度だけ次を実行する。
 
 ```bash
-NEW=output/validation/<新fp>/review
-OLD=output/validation/<旧fp>/review
-mkdir -p "$NEW" && cp "$OLD/review_decisions.json" "$NEW/"
+segmentation-validation review migrate-decisions --dry-run   # 件数を確認
+segmentation-validation review migrate-decisions
+git add review/review_decisions.json review_policy/image_decision_overrides.json
+git commit -m "目視判定と承認ルールをGit管理の正本へ移行"
 ```
 
-コピーしておけば以降の `review export` はそれとマージするので育っていく。
-
-`select --review-decisions <旧fpのパス>` でも読めるが、**新しい方の
-`review_decisions.json` は更新されない**ので、次に素の `select`（やダッシュボードの
-フル更新）を回すと人間の判定が消えて pending に戻る。毎回付け続ける必要がある。
+`output/validation/*/review/review_decisions.json` を全世代ぶん集めてマージする。
+同じキーで判定が食い違う場合は `reviewed_at` が新しい方を採り、日時が無い/同じで
+食い違う場合は**停止して両方を出す**（人が決める）。
 
 > **`review build` を先に走らせないこと。** dataset を `overwrite=True` で作り直す。
 > 未 export の判定を守るゲートは `review_manifest.json` を基準線にしているので、
 > fingerprint が変わった直後は基準線が無い。いまは DB を直接見て
 > `reviewer` の入った判定があれば止めるようにしてあるが、`reviewer` 未入力の
-> 判定は取りこぼす。**先に `review export`**（または上のコピー）を済ませる。
+> 判定は取りこぼす。**先に `review export`** を済ませる。
 
 ### 5.4 未アノテーション画像が異常に多いとき
 

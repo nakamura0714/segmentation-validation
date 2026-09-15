@@ -268,8 +268,15 @@ def write_selection_summary(
     meta: dict[str, Any],
     image_decisions: Sequence[Any] = (),
     images_dropped: int | None = None,
+    merged: dict[str, Any] | None = None,
 ) -> None:
-    """採否の要約。Development JSON を作ってよいかの判定を必ず出す。"""
+    """採否の要約。Development JSON を作ってよいかの判定を必ず出す。
+
+    ``merged`` は統合JSON（学習パイプライン入力）の情報
+    ``{"path", "totals", "conflicts"}``。属性の食い違いはここで毎回可視化する
+    —— 元データ側の不整合なのでツールが解決できず、データ管理側へ報告し続ける
+    必要があるため。
+    """
     counts = _decision_counts(decisions)
     pending = counts["decision"].get(Decision.PENDING.value, 0)
     uncertain = counts["decision"].get(Decision.UNCERTAIN.value, 0)
@@ -498,7 +505,64 @@ def write_selection_summary(
         )
     add("")
 
+    if merged:
+        _add_merged_section(add, merged)
+
     _write(path, lines)
+
+
+def _add_merged_section(add: Any, merged: dict[str, Any]) -> None:
+    """統合JSON（学習パイプライン入力）の節。"""
+    totals = merged.get("totals") or {}
+    conflicts = merged.get("conflicts") or []
+
+    add("## 統合JSON（学習パイプライン入力）")
+    add("")
+    add(f"- 出力: `{merged.get('path')}`")
+    add(
+        f"- 規模: データセット {totals.get('datasets')} / 施設 "
+        f"{totals.get('institutions')} / study {totals.get('studies')} / series "
+        f"{totals.get('series')} / 画像 {totals.get('files')} / annotation "
+        f"{totals.get('annotations')}"
+    )
+    add(
+        "- 由来データセットは各 file entry の `dataset_id` で追える"
+        "（train/test の別を失わないため）"
+    )
+    add("")
+    add(
+        "annotation 総数は各 development.json の keep 合計と一致する。"
+        "採否サマリの keep 件数との差は、データセット横断の画像重複で"
+        "統合時に skip した分（`image_duplicates.csv` 参照）。"
+    )
+    add("")
+
+    if not conflicts:
+        add("元データ間の属性の食い違い: **なし**")
+        add("")
+        return
+
+    add(f"### 元データ間の属性の食い違い（{len(conflicts)} 件）")
+    add("")
+    add(
+        "**どちらが正しいかツールは決めない。** 両方の値を"
+        "`meta_development.conflicts` に記録し、採用値は dataset_id 昇順の先頭"
+        "という決定的な規則で選んでいる。元データ側の不整合なので、"
+        "データ管理側へ報告する材料として毎回ここに出す。"
+    )
+    add("")
+    add("| 階層 | 場所 | 属性 | 値 | 採用 |")
+    add("|---|---|---|---|---|")
+    for conflict in conflicts:
+        values = " / ".join(
+            f"`{name}`={value}"
+            for name, value in (conflict.get("values") or {}).items()
+        )
+        add(
+            f"| {conflict.get('level')} | `{conflict.get('path')}` | "
+            f"`{conflict.get('field')}` | {values} | `{conflict.get('adopted')}` |"
+        )
+    add("")
 
 
 # ------------------------------------------------------------------ helpers

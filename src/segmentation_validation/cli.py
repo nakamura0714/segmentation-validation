@@ -150,6 +150,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="uncertain の扱い",
     )
     build.add_argument("--version-tag", default=None, help="出力先のバージョン名")
+    build.add_argument(
+        "--no-merged",
+        action="store_true",
+        help="12本を1本にまとめた統合JSON（学習パイプライン入力）を作らない。"
+        "既定は作る",
+    )
+    build.add_argument(
+        "--merged-name",
+        default="development_merged.json",
+        help="統合JSONのファイル名（既定 development_merged.json）",
+    )
+    build.add_argument(
+        "--strict-conflicts",
+        action="store_true",
+        help="元データ間で study/series の属性が食い違っていたら停止する。"
+        "既定は meta_development.conflicts に両方の値を記録して続行",
+    )
 
     review = sub.add_parser("review", help="FiftyOne での目視レビュー")
     rsub = review.add_subparsers(dest="review_command", required=True)
@@ -197,6 +214,15 @@ def build_parser() -> argparse.ArgumentParser:
     rsub.add_parser("precision", help="自動ルールの Precision を集計する")
     rimport = rsub.add_parser("import", help="review_decisions.json を FiftyOne へ戻す")
     rimport.add_argument("--path", type=Path, default=None, help="読み込むJSON")
+    rmigrate = rsub.add_parser(
+        "migrate-decisions",
+        help="fingerprint配下の目視判定を review/review_decisions.json（正本）へ移す",
+    )
+    rmigrate.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="書き込まずに移行結果だけ表示する",
+    )
     return parser
 
 
@@ -517,8 +543,12 @@ def _select(config: Config, args: argparse.Namespace) -> int:
     )
 
     # 人間の判定。無ければ review 対象は pending のままになるだけで正しく動く。
-    review_path = args.review_decisions or out_dir / "review" / "review_decisions.json"
-    human, human_images = _read_review_decisions(review_path)
+    review_path = args.review_decisions or _resolve_review_decisions(config)
+    try:
+        human, human_images = _read_review_decisions(review_path)
+    except ValueError as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
     if human or human_images:
         logger.info(
             "人間の判定を読み込んだ: annotation %d 件 / 画像 %d 件",
@@ -563,7 +593,9 @@ def _select(config: Config, args: argparse.Namespace) -> int:
     # review_decisions.json からは追えない。前回との pending 差分だけが
     # 確実に取れる進捗指標なので、ここで比較用に読んでおく。
     previous_decisions = _read_selection(out_dir / "selection_decisions.json")
-    previous_summary = summarize_decisions(previous_decisions) if previous_decisions else None
+    previous_summary = (
+        summarize_decisions(previous_decisions) if previous_decisions else None
+    )
     previous_image_decisions = _read_image_decisions(out_dir / "image_decisions.json")
     previous_images = (
         summarize_images(previous_image_decisions) if previous_image_decisions else None
@@ -739,9 +771,16 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
     from .report.selection_output import read_image_json, read_selection_json
     from .report.summary_md import write_selection_summary
     from .selection.build_dataset import (
-        build_development_json,
+        MergeCollision,
+        MergeResult,
+        build_development_payload,
+        finalize_merged,
         gate_message,
+        merge_into,
+        new_merged_payload,
         resolve_image_duplicates,
+        write_development_json,
+        write_merged_json,
     )
 
     out_dir = config.validation_dir / _fingerprint(config)
@@ -827,37 +866,97 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
             dup_report_path,
         )
 
+    # 統合JSON（学習パイプライン入力）。per-dataset の payload をそのまま
+    # 移し替えるので、元JSONを2回パースしない。
+    merged = None if args.no_merged else new_merged_payload()
+    merge_result = MergeResult()
+    per_dataset_meta: dict[str, Any] = {}
+    merged_summary: dict[str, Any] | None = None
+
     results = []
     for source in config.dataset_sources():
         from .adapters.engineer_set import dataset_id_for
 
         dataset_id = dataset_id_for(source)
         target = config.development_dir / dataset_id / version_tag / "development.json"
-        results.append(
-            build_development_json(
-                source,
-                by_uid_per_dataset.get(dataset_id, {}),
-                target,
-                config,
-                pending_as=args.pending_as,
-                uncertain_as=args.uncertain_as,
-                meta_extra={"fingerprint": _fingerprint(config)},
-                image_decisions=build_by_image,
-            )
+        payload, result = build_development_payload(
+            source,
+            by_uid_per_dataset.get(dataset_id, {}),
+            target,
+            config,
+            pending_as=args.pending_as,
+            uncertain_as=args.uncertain_as,
+            meta_extra={"fingerprint": _fingerprint(config)},
+            image_decisions=build_by_image,
         )
+        write_development_json(payload, target, result, source)
+        results.append(result)
+        if merged is not None:
+            try:
+                merge_into(merged, payload, dataset_id, merge_result)
+            except MergeCollision as error:
+                logger.error("%s", error)
+                return EXIT_FAILURE
+            per_dataset_meta[dataset_id] = payload["meta_development"]
+        # payload は merge 側へ参照ごと移した。ここで手放してGCに任せる。
+        del payload
         logger.info(
             "%s: keep %d / exclude %d / 0件になったfile %d / 画像を落とした %d -> %s",
             dataset_id,
-            results[-1].kept,
-            results[-1].excluded,
-            results[-1].files_emptied,
-            results[-1].images_dropped,
+            result.kept,
+            result.excluded,
+            result.files_emptied,
+            result.images_dropped,
             target,
         )
 
     if not all(r.original_unchanged for r in results):
         logger.error("元JSONが変化した。生成物を信用しないこと")
         return EXIT_FAILURE
+
+    if merged is not None:
+        finalize_merged(
+            merged,
+            merge_result,
+            per_dataset_meta,
+            meta_extra={"fingerprint": _fingerprint(config)},
+        )
+        merged_path = config.development_dir / version_tag / args.merged_name
+        write_merged_json(merged, merged_path)
+        totals = merge_result.as_totals()
+        merged_summary = {
+            "path": merged_path,
+            "totals": totals,
+            "conflicts": merge_result.conflicts,
+        }
+        logger.info(
+            "統合JSON: データセット %d / 施設 %d / study %d / series %d / "
+            "画像 %d / annotation %d -> %s",
+            totals["datasets"],
+            totals["institutions"],
+            totals["studies"],
+            totals["series"],
+            totals["files"],
+            totals["annotations"],
+            merged_path,
+        )
+        if merge_result.conflicts:
+            # 値を選ばず両方を記録してある。どちらが正かは元データ側の問題。
+            logger.warning(
+                "元データ間で属性が食い違う箇所が %d 件ある"
+                "（meta_development.conflicts に両方の値を記録した）",
+                len(merge_result.conflicts),
+            )
+            for conflict in merge_result.conflicts[:10]:
+                logger.warning(
+                    "  - %s %s: %s",
+                    conflict["path"],
+                    conflict["field"],
+                    conflict["values"],
+                )
+            if args.strict_conflicts:
+                logger.error("--strict-conflicts: 食い違いを解消してから再実行する")
+                return EXIT_ISSUES
 
     issues = _read_issues(out_dir / "issues.json")
     decisions = _read_selection(selection_path)
@@ -882,6 +981,7 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
             "overrides": overrides,
             "population": _population(context.groups) if context else {},
         },
+        merged=merged_summary,
     )
     logger.info("selection_summary.md -> %s", summary_path)
     return EXIT_OK
@@ -915,6 +1015,7 @@ def _review(config: Config, args: argparse.Namespace) -> int:
         "flag-report": _review_flag_report,
         "precision": _review_precision,
         "import": _review_import,
+        "migrate-decisions": _review_migrate_decisions,
     }
     return handlers[args.review_command](config, args)
 
@@ -948,9 +1049,9 @@ def _check_unexported(config: Config, args: argparse.Namespace) -> bool:
         return True  # fiftyone が無ければ dataset も無い
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    lost = unexported_human_decisions(
-        config, manifest, review_dir / "review_decisions.json"
-    )
+    # 比較先は正本。fingerprint 配下のスナップショットは書き出しの写しであって、
+    # 「export 済みか」の判断基準にはならない。
+    lost = unexported_human_decisions(config, manifest, config.review_decisions_path)
     if not lost:
         return True
 
@@ -1012,9 +1113,8 @@ def _check_unexported_without_manifest(
     )
     logger.error("  先に: `segmentation-validation review export`")
     logger.error(
-        "  fingerprint を変える前の判定を引き継ぐなら、旧 fingerprint の "
-        "review/review_decisions.json を %s へコピーする",
-        _review_dir(config),
+        "  （判定は正本 %s へ入るので、fingerprint が変わっても手動コピーは要らない）",
+        config.review_decisions_path,
     )
     logger.error("承知の上なら `review build --discard-unexported`")
     return False
@@ -1149,6 +1249,9 @@ def _review_launch(config: Config, args: argparse.Namespace) -> int:
 
 
 def _review_status(config: Config, args: argparse.Namespace) -> int:
+    # 正本の状況は fiftyone が無くても出せる（DB より先に出す）。
+    _report_store_status(config)
+
     try:
         from .review.fiftyone_builder import dataset_summary
     except ImportError:
@@ -1196,6 +1299,60 @@ def _review_status(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _report_store_status(config: Config) -> None:
+    """目視判定の正本の件数と、現在の構成に当たらない行（孤児）を表示する。
+
+    孤児は**消さない**。データセットを一時的に外しただけかもしれないし、
+    人間の判定は再生成できないので、こちらから捨てる判断はしない。
+    ただし「元JSONのファイル名が日時以外の部分で変わった」場合はここに現れる
+    （dataset_id が変わって引き当てられなくなる唯一のケース）ので、気づける
+    ようにしておく。
+    """
+    from .review import decision_store as store
+
+    path = config.review_decisions_path
+    if not path.exists():
+        logger.warning(
+            "目視判定の正本が無い: %s（`review migrate-decisions` で作る）", path
+        )
+        return
+    try:
+        rows = store.load_rows(path)
+    except store.DecisionStoreError as error:
+        logger.error("%s", error)
+        return
+
+    counts = {
+        "annotations": sum(1 for r in rows if r["kind"] == store.KIND_ANNOTATION),
+        "images": sum(1 for r in rows if r["kind"] == store.KIND_IMAGE),
+    }
+    logger.info(
+        "正本 %s: annotation %d / 画像 %d",
+        path,
+        counts["annotations"],
+        counts["images"],
+    )
+
+    context = _load_context(config)
+    if context is None:
+        return
+    known = {
+        store.KIND_ANNOTATION: {r.annotation_uid for r in context.records}
+        | {r.annotation_uid for r in context.out_of_scope}
+        | {r.annotation_uid for r in context.cross_dataset_excluded},
+        store.KIND_IMAGE: {g.stable_file_uid for g in context.groups},
+    }
+    stray = store.orphans(rows, known)
+    if not stray:
+        logger.info("  すべて現在の構成に対応している")
+        return
+    logger.warning(
+        "  現在の構成に当たらない判定が %d 件ある（消さずに残す）", len(stray)
+    )
+    for row in stray[:5]:
+        logger.warning("    - %s %s", row["kind"], store.stable_uid(row))
+
+
 def _review_export(config: Config, args: argparse.Namespace) -> int:
     try:
         from .review.export_decisions import collect_decisions, write_decisions
@@ -1217,15 +1374,31 @@ def _review_export(config: Config, args: argparse.Namespace) -> int:
         logger.error("%s", error)
         return EXIT_FAILURE
 
-    target = _review_dir(config) / "review_decisions.json"
-    write_decisions(target, rows, config)
+    from .review import decision_store as store
+
+    # 正本（fingerprint 非依存・git管理）へマージする。
+    target = config.review_decisions_path
+    try:
+        all_rows = write_decisions(target, rows, config)
+    except store.DecisionStoreError as error:
+        logger.error("%s", error)
+        return EXIT_ISSUES
     logger.info(
-        "review_decisions: annotation %d / 画像 %d -> %s",
+        "review_decisions: 今回 annotation %d / 画像 %d -> %s（累計 %d 件）",
         sum(1 for r in rows if r["kind"] == "annotation"),
         sum(1 for r in rows if r["kind"] == "image"),
         target,
+        len(all_rows),
     )
+
+    # fingerprint 配下にはスナップショットを残す。正本ではないが、その時点の
+    # 構成で何が判定済みだったかを後から確かめられるようにしておく（既存の
+    # review_decisions.csv を見る手順やダッシュボード表示も壊さない）。
+    snapshot_path = _review_dir(config) / "review_decisions.json"
+    store.snapshot(all_rows, snapshot_path, config.review.dataset_name)
+    logger.info("スナップショット: %s", snapshot_path)
     logger.info("次: `segmentation-validation select` で採否へ反映する")
+    logger.info("正本が更新された。`git add %s` して commit すること", target)
     return EXIT_OK
 
 
@@ -1276,7 +1449,8 @@ def _review_precision(config: Config, args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     issues = _read_issues(out_dir / "issues.json")
-    verdicts = read_verdicts(_review_dir(config) / "review_decisions.json")
+    # 目視判定の正本（fingerprint 非依存）から読む。
+    verdicts = read_verdicts(_resolve_review_decisions(config))
     results = compute_precision(issues, verdicts, config)
 
     target = out_dir / "precision.md"
@@ -1312,7 +1486,7 @@ def _review_import(config: Config, args: argparse.Namespace) -> int:
         logger.error("fiftyone が無い。`uv sync --group review` を実行する")
         return EXIT_FAILURE
 
-    path = args.path or _review_dir(config) / "review_decisions.json"
+    path = args.path or _resolve_review_decisions(config)
     if not path.exists():
         logger.error("判定ファイルが無い: %s", path)
         return EXIT_FAILURE
@@ -1321,6 +1495,100 @@ def _review_import(config: Config, args: argparse.Namespace) -> int:
     except RuntimeError as error:
         logger.error("%s", error)
         return EXIT_FAILURE
+    return EXIT_OK
+
+
+def _review_migrate_decisions(config: Config, args: argparse.Namespace) -> int:
+    """fingerprint 配下に散った目視判定を Git 管理の正本へ集める。
+
+    fingerprint は対象JSONの mtime/sha256 から決まるので、データセットを
+    1本足すだけで変わる。そのたびに目視結果が新しい空ディレクトリを指して
+    しまい、手動 ``cp`` で引き継ぐ運用になっていた。これを一度きりの移行で
+    ``review/review_decisions.json`` に集約する。
+
+    画像側のキーは ``file_uid``（source_json 込み）から
+    ``dataset_id + image_key`` へ昇格する。``dataset_id_for()`` に通すだけの
+    機械的な変換なので情報は失われない。
+    """
+    from .review import decision_store as store
+
+    target = config.review_decisions_path
+    sources = sorted(config.validation_dir.glob("*/review/review_decisions.json"))
+    sources = [path for path in sources if path.resolve() != target.resolve()]
+    if not sources:
+        logger.error(
+            "移行元が無い: %s", config.validation_dir / "*/review/review_decisions.json"
+        )
+        return EXIT_FAILURE
+
+    merged: list[dict[str, Any]] = store.load_rows(target) if target.exists() else []
+    if merged:
+        logger.info("既存の正本 %d 件に重ねる: %s", len(merged), target)
+
+    ignored = 0
+    for path in sources:
+        try:
+            rows = store.load_rows(path)
+        except store.DecisionStoreError as error:
+            logger.error("%s", error)
+            return EXIT_FAILURE
+        # dataset_id を持たない annotation 行は突合に使えない。誤って別データ
+        # セットへ適用するくらいなら目視漏れの方がまし（select と同じ方針）。
+        usable = [
+            row
+            for row in rows
+            if row["kind"] != store.KIND_ANNOTATION or row.get("dataset_id")
+        ]
+        ignored += len(rows) - len(usable)
+        merged, conflicts = store.merge_rows(merged, usable)
+        unresolved = [c for c in conflicts if not c.resolved_by]
+        if unresolved:
+            logger.error(
+                "%s の判定が既存と食い違い、reviewed_at でも決められない（%d 件）",
+                path,
+                len(unresolved),
+            )
+            for conflict in unresolved[:10]:
+                logger.error("  - %s", conflict.describe())
+            logger.error("どちらを正とするか決めてから再実行する")
+            return EXIT_ISSUES
+        for conflict in conflicts:
+            logger.warning("reviewed_at で解決: %s", conflict.describe())
+        logger.info(
+            "%s: annotation %d / 画像 %d",
+            path.parent.parent.name,
+            sum(1 for r in usable if r["kind"] == store.KIND_ANNOTATION),
+            sum(1 for r in usable if r["kind"] == store.KIND_IMAGE),
+        )
+
+    n_annotations = sum(1 for r in merged if r["kind"] == store.KIND_ANNOTATION)
+    n_images = sum(1 for r in merged if r["kind"] == store.KIND_IMAGE)
+    if ignored:
+        logger.warning(
+            "dataset_id を持たない旧形式の annotation 行 %d 件を読み飛ばした", ignored
+        )
+
+    if args.dry_run:
+        logger.info(
+            "--dry-run: 書き込まない。移行後は annotation %d / 画像 %d になる",
+            n_annotations,
+            n_images,
+        )
+        return EXIT_OK
+
+    try:
+        store.write_rows(target, merged, config.review.dataset_name)
+    except store.DecisionStoreError as error:
+        logger.error("%s", error)
+        return EXIT_ISSUES
+    logger.info(
+        "正本へ移行: annotation %d / 画像 %d -> %s", n_annotations, n_images, target
+    )
+    logger.info(
+        "次: `git add %s %s` して commit する",
+        target.relative_to(config.project_root),
+        config.image_decision_overrides_path.relative_to(config.project_root),
+    )
     return EXIT_OK
 
 
@@ -1631,65 +1899,87 @@ def _read_selection(path: Path) -> list:
     return result
 
 
+def _resolve_review_decisions(config: Config) -> Path:
+    """人間の判定をどこから読むか決める。
+
+    正本は ``review/review_decisions.json``（fingerprint 非依存・git管理）。
+    まだ移行していないリポジトリでも動くよう、正本が無いときだけ従来の
+    fingerprint 配下へ落ちる。
+    """
+    target = config.review_decisions_path
+    if target.exists():
+        return target
+    legacy = _review_dir(config) / "review_decisions.json"
+    if legacy.exists():
+        logger.warning(
+            "目視判定の正本 %s が無いので %s を読む。"
+            "`review migrate-decisions` で正本へ移すこと"
+            "（fingerprint が変わると判定を引き継げない）",
+            target,
+            legacy,
+        )
+        return legacy
+    return target
+
+
 def _read_review_decisions(
     path: Path,
 ) -> tuple[dict[str, HumanDecision], dict[str, HumanDecision]]:
-    """``review_decisions.json`` を読む。無ければ空。
+    """目視判定を読む。無ければ空。
 
     FiftyOne の DB を正本にしないので、人間の判定は必ずこのファイル経由で流す。
-    戻り値は ``(annotation単位, 画像単位)``。画像単位は annotation を持たない
-    画像（未アノテーションのビュー）の採否で、キーは ``file_uid``。
+    戻り値は ``(annotation単位, 画像単位)``。
 
-    annotation単位のキーは ``annotation_uid``（``f"{dataset_id}::{geometry_uid}"``）。
+    annotation のキーは ``annotation_uid``（``dataset_id::geometry_uid``）。
     geometry_uid は cross-dataset 重複でデータセットをまたいで再利用される
     ため、bare geometry_uid をキーにすると無関係な別データセットの
     annotation に人間の判定が誤って適用される
     （``selection/decisions.py::build_decisions`` 参照）。
-    """
-    import json
 
-    if not path.exists():
-        return {}, {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        payload = {"decisions": payload, "image_decisions": []}
+    画像のキーは ``stable_file_uid``（``dataset_id::inst/study/series/file``）。
+    旧形式の ``file_uid`` は ``source_json``（日時スタンプ込みのファイル名）を
+    含むため、元JSONを再エクスポートすると全件が引き当て不能になる。
+    読み込み時に ``decision_store`` が昇格する。
+    """
+    from .review import decision_store as store
+
+    try:
+        rows = store.load_rows(path)
+    except store.DecisionStoreError as error:
+        # 読めないファイルを「判定が無い」と解釈してはいけない。人間の判定を
+        # 丸ごと落としたまま select が通ると、目視の成果が静かに消える。
+        raise ValueError(f"目視判定を読めない: {error}") from error
 
     annotations: dict[str, HumanDecision] = {}
-    for row in payload.get("decisions") or []:
-        uid = row["geometry_uid"]
+    images: dict[str, HumanDecision] = {}
+    skipped = 0
+    for row in rows:
         dataset_id = row.get("dataset_id")
-        if not dataset_id:
-            # 古い形式（dataset_id を持たない review_decisions.json）。
-            # 安全側に倒し、この行は無視する（誤爆させるよりは目視漏れの方がまし）。
-            logger.warning(
-                "review_decisions.json の annotation行に dataset_id が無い"
-                "（旧形式）。誤って別データセットへ適用されるのを防ぐため無視する: "
-                "geometry_uid=%s",
-                uid,
-            )
-            continue
-        annotations[f"{dataset_id}::{uid}"] = HumanDecision(
-            geometry_uid=uid,
+        human = HumanDecision(
+            geometry_uid=row["key"],
             decision=Decision(row["decision"]),
-            reason=row.get("reason") or "",
-            reviewer=row.get("reviewer"),
-            reviewed_at=row.get("reviewed_at"),
-            comment=row.get("comment"),
+            reason=row["reason"],
+            reviewer=row["reviewer"] or None,
+            reviewed_at=row["reviewed_at"] or None,
+            comment=row["comment"] or None,
             dataset_id=dataset_id,
         )
+        if row["kind"] == store.KIND_ANNOTATION:
+            if not dataset_id:
+                # 古い形式。誤って別データセットへ適用するくらいなら
+                # 目視漏れの方がまし。
+                skipped += 1
+                continue
+            annotations[store.annotation_key(dataset_id, row["key"])] = human
+        else:
+            images[store.stable_uid(row)] = human
 
-    images: dict[str, HumanDecision] = {}
-    for row in payload.get("image_decisions") or []:
-        uid = row["file_uid"]
-        images[uid] = HumanDecision(
-            geometry_uid=uid,
-            decision=Decision(row["decision"]),
-            reason=row.get("reason") or "",
-            reviewer=row.get("reviewer"),
-            reviewed_at=row.get("reviewed_at"),
-            comment=row.get("comment"),
+    if skipped:
+        logger.warning(
+            "dataset_id を持たない旧形式の annotation 判定 %d 件を無視した"
+            "（誤って別データセットへ適用されるのを防ぐため）",
+            skipped,
         )
-
     return annotations, images
 
 
