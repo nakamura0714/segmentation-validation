@@ -3539,6 +3539,7 @@ dependencies = [
     { name = "pandas" },
     { name = "pillow" },
     { name = "pydicom" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -3563,6 +3564,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=3.0.5" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "pydicom", specifier = ">=3.0.2" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [package.metadata.requires-dev]

@@ -17,6 +17,12 @@
 study / series レベルの ``annotations`` は ``annotation_id`` を持つ別スキーマの
 分類ラベルで、マスクを持たない。検証対象は file レベルの geometry annotation のみ。
 
+``selection/build_dataset.py`` が作る統合JSON（``development_merged.json``）も同じ形で、
+**file entry にだけ ``dataset_id`` が増える**（file 単位が唯一の衝突しない階層なので、
+由来はそこに持たせてある）。本アダプタは file entry の ``dataset_id`` が
+あればそれを優先し、
+無ければファイル名由来の ``dataset_id`` を使うので、統合JSONもそのまま読める。
+
 なお ``docs/dataset_format.md`` の標準 Dataset/Prediction 形式とは別物。
 本アダプタはレガシーな engineer-set 形式だけを扱う。
 """
@@ -69,6 +75,9 @@ class EngineerSetAdapter:
     dataset_id: str = ""
     version_id: str | None = None
     version_date: str | None = None
+    #: 統合JSONのときだけ中身がある（生成時刻・fingerprint・データセット別内訳）。
+    #: 出力物に出所を記録するために持つ。元JSONを2回パースしないで済ませるのが目的。
+    meta_development: dict[str, Any] = field(default_factory=dict, repr=False)
     _dataset: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -76,6 +85,7 @@ class EngineerSetAdapter:
         self._dataset = payload.get("dataset", {})
         self.version_id = payload.get("version_id")
         self.version_date = payload.get("version_date")
+        self.meta_development = payload.get("meta_development") or {}
         if not self.dataset_id:
             self.dataset_id = dataset_id_for(self.source_path)
 
@@ -155,7 +165,9 @@ class EngineerSetAdapter:
                     for file_key, file_rec in file_list.items():
                         image_path = file_rec.get("image_path") or ""
                         common = {
-                            "dataset_id": self.dataset_id,
+                            # 統合JSONは file entry に由来を持つ。
+                            # 無ければファイル名由来。
+                            "dataset_id": file_rec.get("dataset_id") or self.dataset_id,
                             "source_json": source_json,
                             "institution": institution,
                             "study": study_key,

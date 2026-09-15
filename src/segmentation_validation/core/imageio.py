@@ -1,21 +1,27 @@
-"""DICOM・マスクPNG・参照マスクの読み込み。
+"""DICOM・マスクPNG・参照マスクの読み書き。
 
 ``core.measure`` 以外からは、単発の表示や検証にだけ使う。
 一括走査で画素ファイルを開くのは ``core.measure`` に一本化してある
 （1665枚のマスクをディスクから1度だけ読むという設計の要）。
+
+書き出し（``convert_dicom_to_png`` / ``save_binary_mask``）もここに置く。
+``tests/test_architecture.py`` が PIL / pydicom の import をこのモジュールと
+``review/export_assets.py`` に限っているため、画素を触る処理はここへ集める。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import pydicom
 from PIL import Image, UnidentifiedImageError
-from pydicom.pixels import apply_voi_lut
+from pydicom.pixels import apply_modality_lut, apply_voi_lut
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +33,10 @@ MAX_UNIQUE_VALUES = 8
 # PNG シグネチャを確認して、PIL の例外に頼らず早期に弾く。
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MIN_PNG_BYTES = 200
+
+#: 16bit PNG の理論上の最大値。学習側 ``utils/io.py`` の同名定数と同じ値で、
+#: あちらでは windowing の分母、こちらでは uint16 へ収めるときの上限になる。
+UINT16_MAX = 65535
 
 
 class MaskReadError(RuntimeError):
@@ -156,6 +166,88 @@ def load_dicom_image(path: Path) -> np.ndarray:
     if hi <= lo:
         return np.zeros_like(array)
     return np.clip((array - lo) / (hi - lo), 0.0, 1.0)
+
+
+def convert_dicom_to_png(dicom_path: Path, png_path: Path) -> dict[str, Any]:
+    """DICOM を 16bit グレースケール PNG へ変換し、provenance を返す。
+
+    **実装の正典は med-chest-metry-pi6 の ``dataprep/dicom_to_png.py``** で、これは
+    その移植。あちらへパッケージ依存を張れない（torch / lightning / lpdata を引き、
+    lpdata が ``opencv-python`` を要求して本リポジトリの headless 統一と衝突する）ため、
+    同等の処理をここに持つ。``tests/test_lpdata_images.py`` の realdata テストが、
+    移植元が変わったときに落ちるようにしてある。
+
+    **per-image の min-max 正規化はしない。** modality LUT 適用と MONOCHROME1 反転だけを
+    施して元の濃度スケールを保つ（濃度の絶対情報を壊さない。窓処理は学習側の前処理）。
+
+    処理順が意味を持つので変えないこと:
+
+    1. MONOCHROME1 の反転は **modality LUT を当てる前の stored 値空間**で行う
+       （DICOM の表示意味に沿う）
+    2. 反転の上限は per-image の max ではなく ``BitsStored`` 由来の固定レンジ。
+       画像ごとに濃度スケールが変動しないようにするため
+
+    なお ``load_dicom_image`` は目視用に VOI LUT とパーセンタイル正規化を当てる別物で、
+    学習入力には使えない。
+    """
+    dicom_path, png_path = Path(dicom_path), Path(png_path)
+    dataset = pydicom.dcmread(str(dicom_path))
+    raw = dataset.pixel_array
+
+    inverted = False
+    if getattr(dataset, "PhotometricInterpretation", "") == "MONOCHROME1":
+        bits_stored = getattr(dataset, "BitsStored", None)
+        ceiling = (1 << int(bits_stored)) - 1 if bits_stored else int(raw.max())
+        raw = ceiling - raw
+        inverted = True
+
+    array = apply_modality_lut(raw, dataset)
+    # スケール変換はしない。負値と範囲外だけを uint16 に収める。
+    pixel_array: np.ndarray = np.clip(array, 0, UINT16_MAX).astype(np.uint16)
+
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    # 途中で落ちたときに中途半端なPNGを残さない。冪等な再実行
+    # （既存を skip する）が「存在する＝完成している」に依存しているため。
+    tmp = png_path.with_name(png_path.name + ".tmp.png")
+    try:
+        if not cv2.imwrite(str(tmp), pixel_array):
+            raise OSError(f"PNG の書き出しに失敗した: {png_path}")
+        os.replace(tmp, png_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    spacing = getattr(dataset, "PixelSpacing", None)
+    return {
+        "dicom_path": str(dicom_path),
+        "png_path": str(png_path),
+        "sop_instance_uid": getattr(dataset, "SOPInstanceUID", None),
+        "bits_stored": getattr(dataset, "BitsStored", None),
+        "photometric_interpretation": getattr(
+            dataset, "PhotometricInterpretation", None
+        ),
+        "inverted_monochrome1": inverted,
+        "pixel_spacing": [float(v) for v in spacing] if spacing is not None else None,
+        "output_dtype": "uint16",
+    }
+
+
+def save_binary_mask(path: Path, mask: np.ndarray) -> Path:
+    """bool 配列を 0/255 の8bit PNG として書き出す。
+
+    ``load_binary_mask`` が非ゼロを前景とするので 0/255 で往復する。
+    ``convert_dicom_to_png`` と同じ理由で一時ファイル経由にする。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    array = (np.asarray(mask).astype(bool).astype(np.uint8)) * 255
+    tmp = path.with_name(path.name + ".tmp.png")
+    try:
+        if not cv2.imwrite(str(tmp), array):
+            raise OSError(f"マスクPNGの書き出しに失敗した: {path}")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return path
 
 
 def load_mask_raw(path: Path, keep_array: bool = True) -> RawMask:

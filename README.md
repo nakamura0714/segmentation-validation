@@ -157,8 +157,12 @@ selection_decisions.csv : final_decision = keep         ← 開発データに�
 | `dashboard.html` | 以上をブラウザで辿る（`serve` で常駐配信できる） | — |
 | `development.json` | keep だけを反映した開発用データ | 元JSONと同一スキーマ |
 | **`development_merged.json`** | **12本を1本にまとめた学習パイプライン入力** | 元JSON互換 + file entry に `dataset_id` |
+| **`chest_metry_pi6_pneumothorax.json`** | **学習側（med-chest-metry-pi6）が読む lp-data 標準形式** | 1画像=1サンプル |
+| `lpdata_export_summary.md` | lp-data 書き出しの結果と、**次に人間が決めるべきこと** | — |
+| `mask_merge_manifest.json` | 結合気胸マスクの再現情報（元マスクと期待画素数） | マスクを持つサンプル分 |
 
-出力先は `output/validation/<fingerprint>/` と `output/development/<dataset>/<version>/`。
+出力先は `output/validation/<fingerprint>/`、`output/development/<dataset>/<version>/`、
+`output/lpdata/<version>/`。
 `<fingerprint>` は対象JSONのサイズ・mtime・sha256 から作る
 （`version_id` は3本とも `2.2` なので、それ単独ではキーにできない）。
 
@@ -227,9 +231,9 @@ uv run python -c "import importlib.metadata as m, cv2; \
   if d.metadata['Name'] and 'opencv' in d.metadata['Name'].lower()])"
 #   -> 4.14.0 ['opencv-python-headless']
 
-# テストを流す（合成データだけ。1秒で終わる）
+# テストを流す（合成データだけ。数秒で終わる）
 uv run pytest
-#   -> 221 passed
+#   -> 567 passed
 ```
 
 ### テスト
@@ -656,6 +660,92 @@ FiftyOne を使わずに1症例だけ図で確認したいとき。
 uv run python -m segmentation_validation.overlay_masks --institution kajinoki
 uv run python -m segmentation_validation.overlay_masks --study CXASW00000278_002 --original
 ```
+
+### 3.11 学習側へ渡す（lp-data 形式へ書き出す）
+
+3.9 で作った統合JSONは engineer-set 形式のままなので、学習リポジトリ
+[med-chest-metry-pi6](/mnt/project/chest/metry/pi6/work/nakamura/med-chest-metry-pi6) は読めない。
+`export-lpdata` が lp-data 標準形式（`docs/dataset_format.md`）へ変換し、
+あわせて DICOM を 16bit PNG へ変換する。
+
+```bash
+# 1) 下見。画素を読まず画像も作らないので数十秒で終わる
+uv run segmentation-validation export-lpdata \
+    --no-measure --image-mode none --mask-mode none \
+    --dataset-name chest_metry_pi6_pneumothorax \
+    --dataset-id chest_metry_pi6_pneumothorax_2026_001 --owner <あなた>
+
+# 2) 少量で本番経路を通す（画像変換とマスク生成を含む）
+uv run segmentation-validation export-lpdata --limit 200 \
+    --image-mode convert --mask-mode generate ...
+
+# 3) 全件（長時間。先に df -h /mnt/project で空きを見る）
+uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
+```
+
+同じことは [`notebooks/lpdata_export.ipynb`](notebooks/lpdata_export.ipynb) からも実行できる
+（**ロジックは持たず**、CLI と同じ `export_lpdata()` を呼ぶだけ）。
+
+**属性の型と意味の正典は本リポジトリに無い。** med-chest-metry-pi6 の
+`src/chest_metry_pi6/data/dataset_template_pneumothorax.yaml`（PR #68 で確定）を読んで
+`meta.structure` をそのまま写す。コード側に structure を書き直すと、テンプレートが
+更新されたときに黙って古いスキーマを出し続けるため。ずれたら起動時に落ちる。
+
+**出力先は3つとも独立に指定できる。** 既定は `output/lpdata/<version_tag>/` 配下。
+
+| オプション | 中身 |
+| --- | --- |
+| `--out` | データセットJSON（既定 `chest_metry_pi6_pneumothorax.json`） |
+| `--image-output-dir` | DICOM を変換した 16bit PNG（既定 `images/`） |
+| `--mask-output-dir` | 結合した気胸マスク（既定 `masks/pneumothorax/`） |
+
+`--path-style relative`（既定）では、出力JSONの親ディレクトリ配下にあるものだけ相対パスで
+記録し、原本DICOM（`/mnt/medical2`）と参照マスク（`/mnt/medicaldb`）は絶対パスのまま残す。
+
+#### ラベルは既存 annotation と明示的な正常情報だけから作る
+
+**読影レポートは使わない。** 後日CSVで受け取り、既存の出力を更新する独立した処理として足す想定。
+
+| 属性 | 規則 | 実測 |
+| --- | --- | ---: |
+| `finding_labels` | `Findings` の geometry annotation の `code_text_eng` | 非空 6,680 |
+| `abnormal_finding_status` | 所見あり→`present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 6,680 / 853 / 35,041 |
+| `pneumothorax_case` | 気胸 annotation が1件以上 | true 3,521 |
+| `bulla_bleb_status` | `bulla_bleb` があれば `present`、他は `unknown`（`absent` は出さない） | present 234 |
+| `pneumothorax_side` | 常に `null`（患者基準の解剖学的左右で、画像からは起こせない） | — |
+
+**annotation が無いことだけを理由に `absent` にはしない。** 未アノテーションと正常例を
+混同すると、未アノテーション陽性を陰性の教師信号にしてしまう。データセット名
+（`ChestMetry_PI6px_normal` 等）も根拠にしない —— 同データセット 24,539件のうち明示の
+`No Findings/normal` は 142件だけで、逆に `StudyAnno/abnormal` が 665件ある。
+
+異常所見ではない geometry annotation（`Difficulty` / `Grade` / `Location` / `Body Parts` /
+`FP` / `Disease`）は `present` の根拠にしない。どれを所見として採るか、どれを「明確な正常」と
+認めるかは `config.lpdata_export` の2つの allowlist（`finding_code_systems` /
+`normal_evidence`）で決まる。根拠が確認できたものだけを足していく。
+
+**生成物の不変条件**（med-chest-metry-pi6 のテンプレートが正典。実測で違反0件）:
+
+- `present` ⇔ `finding_labels` が非空 / `absent`・`unknown` なら `finding_labels` は `[]`
+- **`present` / `absent` のときに限り** `pneumothorax_case == ("pneumothorax" in finding_labels)`
+- `absent` かつ `pneumothorax_case: true` は不正
+- **`unknown` のときは気胸ラベルとの対応を課さない。**
+  「気胸ラベルはあるが読影所見は未取得」（`unknown` × `true` × `[]`）は正当な組み合わせ。
+  ただし**既存 annotation だけで作る初期エクスポートでは 0件が正しい**
+  （気胸 annotation があれば必ず `present` になるため）。読影レポートCSV更新で初めて現れる
+
+**`lung_rect` は肺野と胸郭の両方のマスクが揃ったときだけ入る。** 片方で代用すると由来の違う
+矩形が同じ属性に混ざる（テンプレートの規約）。参照マスクの実測被覆から、埋まるのは全体の
+1/3以下になる。
+
+**判断が要るものは `lpdata_export_summary.md` に出る**（allowlist に入っていない正常らしき
+ラベル、気胸データセット名なのに気胸 annotation が0件のもの、所見語彙の一覧）。
+
+> ⚠️ 画像変換は全件で uint16 生データ 251 GiB を読み、PNG を約 113 GiB 書く。
+> 既存のPNGは skip するので途中で止めても再開できるが、まず `--limit` で所要時間を測ること。
+> DICOM が無い画像は `image_file: null` にして続行する（**空画像は作らない**）。
+> 変換処理は med-chest-metry-pi6 の `dataprep/dicom_to_png.py` からの移植で、
+> 既存PNG（med-dicom 経由）と画素値が一致するかは未確認（向こうの Issue #27）。
 
 ---
 

@@ -259,6 +259,47 @@ class GuiConfig:
 
 
 @dataclass(frozen=True)
+class LpdataExportConfig:
+    """lp-data 標準形式へのエクスポート（``export-lpdata``）の設定。
+
+    属性の型と意味の**正典はテンプレートYAML側**にあり、こちらには持たない
+    （テンプレートが更新されたときに黙って古いスキーマを出さないため。
+    ``lpdata_export/template.py`` 参照）。ここに置くのは、テンプレートからは
+    決まらない「元データのどのラベルをどう読むか」だけ。
+    """
+
+    # 属性の型と意味の正典。med-chest-metry-pi6 の PR #68 で確定したもの。
+    # プロジェクトルートから見て隣のリポジトリ。
+    template_path: str = (
+        "../med-chest-metry-pi6/src/chest_metry_pi6/data/"
+        "dataset_template_pneumothorax.yaml"
+    )
+    # output/ 配下の既定の置き場。3つとも CLI で個別に上書きできる。
+    output_dirname: str = "lpdata"
+    image_dirname: str = "images"
+    mask_dirname: str = "masks/pneumothorax"
+
+    # ``finding_labels`` に採る geometry annotation の code_system。
+    # 実データの geometry には Findings のほかに Grade（重症度）/ Location（位置）/
+    # Difficulty（読影難易度）/ Body Parts（解剖構造）/ FP（偽陽性として明示された
+    # もの）/ Disease・Disease Evolution（疾患名・経過）が付くが、いずれも
+    # **異常所見の名前ではない**ので所見としては採らない。
+    finding_code_systems: list[str] = field(default_factory=lambda: ["Findings"])
+
+    # 「明確な正常」と認めるラベル。``"<code_system>/<code_text_eng>"`` で書き、
+    # geometry / series / study のどの階層に付いていても根拠として採る。
+    #
+    # **annotation が無いことだけを理由に absent にはしない**（未アノテーションと
+    # 正常例は別物で、混同すると未アノテーション陽性を陰性の教師信号にしてしまう）。
+    # データセット名（``ChestMetry_PI6px_normal`` 等）も根拠にしない。
+    #
+    # ``StudyAnno/normal``（1,806件）は由来が確認できていないため既定では入れない。
+    # ``StudyAnno/abnormal`` を present の根拠にしない以上、正常側だけ採ると非対称に
+    # なるため。根拠が確認できたらここに1行足す（実測で absent が 853 → 1,500 になる）。
+    normal_evidence: list[str] = field(default_factory=lambda: ["No Findings/normal"])
+
+
+@dataclass(frozen=True)
 class Config:
     """全設定のルート。"""
 
@@ -271,6 +312,7 @@ class Config:
     decision_policy: DecisionPolicyConfig = field(default_factory=DecisionPolicyConfig)
     review: ReviewConfig = field(default_factory=ReviewConfig)
     gui: GuiConfig = field(default_factory=GuiConfig)
+    lpdata_export: LpdataExportConfig = field(default_factory=LpdataExportConfig)
 
     # ------------------------------------------------------------------ paths
     @property
@@ -288,6 +330,10 @@ class Config:
     @property
     def development_dir(self) -> Path:
         return self.output_dir / "development"
+
+    @property
+    def lpdata_dir(self) -> Path:
+        return self.output_dir / self.lpdata_export.output_dirname
 
     @property
     def image_decision_overrides_path(self) -> Path:

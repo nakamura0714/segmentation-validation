@@ -168,6 +168,83 @@ def build_parser() -> argparse.ArgumentParser:
         "既定は meta_development.conflicts に両方の値を記録して続行",
     )
 
+    lpdata = sub.add_parser(
+        "export-lpdata",
+        help="統合JSONを lp-data 標準形式のデータセットJSONへ書き出す",
+    )
+    lpdata.add_argument(
+        "--merged",
+        type=Path,
+        default=None,
+        help="入力の統合JSON（既定は development_dir の最新 development_merged.json）",
+    )
+    lpdata.add_argument(
+        "--template",
+        type=Path,
+        default=None,
+        help="属性の型と意味の正典となるテンプレートYAML"
+        "（既定は config の lpdata_export.template_path）",
+    )
+    lpdata.add_argument(
+        "--out", type=Path, default=None, help="出力するデータセットJSON"
+    )
+    lpdata.add_argument(
+        "--image-output-dir", type=Path, default=None, help="DICOM変換PNGの出力先"
+    )
+    lpdata.add_argument(
+        "--mask-output-dir", type=Path, default=None, help="結合気胸マスクの出力先"
+    )
+    lpdata.add_argument(
+        "--path-style",
+        choices=("relative", "absolute"),
+        default="relative",
+        help="JSONに書くパスの表記。relative は出力JSONの親を基準にする"
+        "（基準の外にあるものは絶対のまま）",
+    )
+    lpdata.add_argument(
+        "--image-mode",
+        choices=("convert", "planned", "none"),
+        default="convert",
+        help="convert=DICOMを16bit PNGへ変換して実ファイルを参照 / "
+        "planned=変換せず予定パスだけ記録 / none=image_file を null にする",
+    )
+    lpdata.add_argument(
+        "--mask-mode",
+        choices=("generate", "planned", "none"),
+        default="planned",
+        help="generate=結合マスクPNGを書き出す / planned=予定パスだけ記録（既定） / "
+        "none=pixel_array を null にする",
+    )
+    lpdata.add_argument(
+        "--on-missing-dicom",
+        choices=("skip", "error"),
+        default="skip",
+        help="DICOMが無いとき。skip は image_file を null にして続行、error は停止。"
+        "どちらでも空画像は作らない",
+    )
+    lpdata.add_argument(
+        "--no-measure",
+        action="store_true",
+        help="画素を読まず導出値を全てnullにする（下見用。学習には使えない）",
+    )
+    lpdata.add_argument("--jobs", type=int, default=8, help="並列数")
+    lpdata.add_argument("--limit", type=int, default=None, help="先頭N件だけ処理する")
+    lpdata.add_argument(
+        "--only-dataset",
+        action="append",
+        default=[],
+        metavar="DATASET_ID",
+        help="対象データセットを絞る（繰り返し可）",
+    )
+    lpdata.add_argument(
+        "--force",
+        action="store_true",
+        help="計測キャッシュを捨て、既存のPNGも作り直す",
+    )
+    lpdata.add_argument("--dataset-name", default=None, help="meta.dataset_name")
+    lpdata.add_argument("--dataset-id", default=None, help="meta.dataset_id")
+    lpdata.add_argument("--owner", default=None, help="meta.owner")
+
     review = sub.add_parser("review", help="FiftyOne での目視レビュー")
     rsub = review.add_subparsers(dest="review_command", required=True)
     rbuild = rsub.add_parser(
@@ -251,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
         "gui": _gui,
         "serve": _serve,
         "build-dataset": _build_dataset,
+        "export-lpdata": _export_lpdata,
         "review": _review,
     }
     handler = handlers.get(args.command)
@@ -1004,6 +1082,86 @@ def _write_duplicate_report(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
+    """統合JSONを lp-data 標準形式へ書き出す。
+
+    判断も処理もここには置かない（Notebook が同じことを再実装しないで済むように、
+    正本は ``lpdata_export`` パッケージ側に置いてある）。ここは引数を
+    ``ExportOptions`` に組み替えるだけ。
+    """
+    from .lpdata_export import ExportError, ExportOptions, export_lpdata
+    from .lpdata_export.images import MissingDicomError
+    from .lpdata_export.template import TemplateDriftError
+
+    merged = args.merged or _latest_merged(config)
+    if merged is None:
+        logger.error(
+            "統合JSONが見つからない。"
+            "先に build-dataset を実行するか --merged で指定する"
+        )
+        return EXIT_FAILURE
+
+    # 既定の置き場は統合JSONのバージョンタグごと。3つとも個別に上書きできる。
+    settings = config.lpdata_export
+    out_dir = config.lpdata_dir / merged.parent.name
+    out = args.out or out_dir / "chest_metry_pi6_pneumothorax.json"
+    options = ExportOptions(
+        merged_path=merged,
+        template_path=args.template or config.resolve(settings.template_path),
+        out_path=out,
+        image_output_dir=args.image_output_dir or out.parent / settings.image_dirname,
+        mask_output_dir=args.mask_output_dir or out.parent / settings.mask_dirname,
+        dataset_name=args.dataset_name,
+        dataset_id=args.dataset_id,
+        owner=args.owner,
+        image_mode=args.image_mode,
+        mask_mode=args.mask_mode,
+        on_missing_dicom=args.on_missing_dicom,
+        path_style=args.path_style,
+        measure=not args.no_measure,
+        jobs=args.jobs,
+        limit=args.limit,
+        only_datasets=tuple(args.only_dataset),
+        force=args.force,
+    )
+
+    try:
+        result = export_lpdata(config, options)
+    except (ExportError, TemplateDriftError, MissingDicomError, ValueError) as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
+
+    logger.info(
+        "サンプル %d / %s",
+        result.samples,
+        " ".join(f"{k}={v}" for k, v in sorted(result.status_counts.items())),
+    )
+    if result.violations:
+        logger.error(
+            "不変条件の違反が %d 件ある（詳細は %s）",
+            len(result.violations),
+            result.artifacts.get("summary"),
+        )
+        return EXIT_ISSUES
+    return EXIT_OK
+
+
+def _latest_merged(config: Config) -> Path | None:
+    """``development_merged.json`` を新しいバージョンタグから探す。
+
+    ``build-dataset --version-tag`` は既定で ``YYYYMMDD`` なので辞書順の降順が
+    新しい順になる。手で付けたタグが混ざっても mtime で決めない —— 再実行で
+    順序が入れ替わると、どの世代を書き出したのか追えなくなる。
+    """
+    if not config.development_dir.is_dir():
+        return None
+    for directory in sorted(config.development_dir.iterdir(), reverse=True):
+        candidate = directory / "development_merged.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _review(config: Config, args: argparse.Namespace) -> int:
