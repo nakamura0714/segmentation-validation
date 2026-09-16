@@ -1,4 +1,8 @@
 kind,dataset_id,key,decision,reason,reviewer,reviewed_at,comment,legacy_file_uid
+annotation,ANN_EIRLPRJ_01263,5eb6f2bf-a258-41d5-969b-36ec52ca6c40,keep,visually_valid,unknown,,,
+annotation,ANN_EIRLPRJ_01263,678100fe-30a2-4a61-a98c-7bee666177c4,keep,visually_valid,unknown,,,
+annotation,ANN_EIRLPRJ_01263,791c34c6-9f60-4c6e-a547-982081039071,keep,visually_valid,unknown,,,
+annotation,ANN_EIRLPRJ_01263,a4e7c759-365b-43e9-a9e1-4a3bbaebb4ac,keep,visually_valid,unknown,,,
 annotation,ANN_EIRLPRJ_01272,07aec4b2-b16f-4eff-a10d-ef5d048b3636,keep,,unknown,,,
 annotation,ANN_EIRLPRJ_01272,32cdebfd-39cd-4da5-b5c1-8515609aa51c,keep,,unknown,,,
 annotation,ANN_EIRLPRJ_01272,768c3d56-d994-40a7-a72a-f9bf5fbbaa95,keep,,unknown,,,
@@ -1555,7 +1559,7 @@ annotation,ANN_EIRLPRJ_01334,82032754-35f3-4b5c-ad5a-d6c246c47f0c,keep,visually_
 annotation,ANN_EIRLPRJ_01334,8266f678-db8f-43ee-b765-a4f3cc919670,keep,visually_valid,unknown,,,
 annotation,ANN_EIRLPRJ_01334,82d77126-00cd-4742-8360-2a0c93dc5e96,keep,visually_valid,unknown,,,
 annotation,ANN_EIRLPRJ_01334,82dcf159-22e8-45e0-916a-76120a89de40,keep,visually_valid,unknown,,,
-annotation,ANN_EIRLPRJ_01334,82dd52a0-db41-46bc-8e8a-df998e594b11,keep,invalid_annotation,unknown,,,
+annotation,ANN_EIRLPRJ_01334,82dd52a0-db41-46bc-8e8a-df998e594b11,exclude,invalid_annotation,unknown,2026-09-16T00:00:00+00:00,2026-09-16 会議で exclude に決定,
 annotation,ANN_EIRLPRJ_01334,835b2b45-0d44-4e81-b79a-4287b5d3fc5a,keep,visually_valid,unknown,,,
 annotation,ANN_EIRLPRJ_01334,844c5503-b0aa-46d6-a9fa-b79b4ce1e900,keep,visually_valid,unknown,,,
 annotation,ANN_EIRLPRJ_01334,84d0cd65-f617-4479-a763-679aa75c4fe8,keep,visually_valid,unknown,,,
@@ -2421,6 +2425,7 @@ annotation,PTR_CX_MT_PI3_pneumothorax,f649a9f3-c4fa-41fe-96ad-eca634aecd64,keep,
 annotation,PTR_CX_MT_PI3_pneumothorax,fe48d1a9-7d4c-4703-ab73-35504b30bd22,keep,visually_valid,unknown,,,
 annotation,PTR_CX_MT_PI3_pneumothorax,fe554305-0329-428b-a8e7-816ea040c9c4,keep,visually_valid,unknown,,,
 annotation,PTR_CX_MT_PI3_pneumothorax,fff35e88-932f-4c90-8557-53efffe42cba,keep,visually_valid,unknown,,,
+image,ANN_EIRLPRJ_01263,ofuna_chuo/CXOFC00000041_004/CXOFC00000041_004_001/CXOFC00000041_004_001_002,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01263-20260916_032022.json::ofuna_chuo/CXOFC00000041_004/CXOFC00000041_004_001/CXOFC00000041_004_001_002
 image,ANN_EIRLPRJ_01272,asahikawa/CXASW00001546_000/CXASW00001546_000_000/CXASW00001546_000_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::asahikawa/CXASW00001546_000/CXASW00001546_000_000/CXASW00001546_000_000_001
 image,ANN_EIRLPRJ_01272,asahikawa/CXASW00001554_000/CXASW00001554_000_000/CXASW00001554_000_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::asahikawa/CXASW00001554_000/CXASW00001554_000_000/CXASW00001554_000_000_001
 image,ANN_EIRLPRJ_01272,asahikawa/CXASW00001567_000/CXASW00001567_000_000/CXASW00001567_000_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::asahikawa/CXASW00001567_000/CXASW00001567_000_000/CXASW00001567_000_000_001
@@ -2454,3 +2459,5 @@ image,ANN_EIRLPRJ_01272,nagoya_daiichi/LTNGF00001325_000/LTNGF00001325_000_000/L
 image,ANN_EIRLPRJ_01272,nagoya_daiichi/LTNGF00001326_000/LTNGF00001326_000_000/LTNGF00001326_000_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001326_000/LTNGF00001326_000_000/LTNGF00001326_000_000_001
 image,ANN_EIRLPRJ_01272,nagoya_daiichi/LTNGF00001328_000/LTNGF00001328_000_000/LTNGF00001328_000_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001328_000/LTNGF00001328_000_000/LTNGF00001328_000_000_001
 image,ANN_EIRLPRJ_01272,okayama_chuo/CXOKC00001821_001/CXOKC00001821_001_000/CXOKC00001821_001_000_001,exclude,,unknown,,,engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::okayama_chuo/CXOKC00001821_001/CXOKC00001821_001_000/CXOKC00001821_001_000_001
+image,ANN_EIRLPRJ_01334,kaggle_pneumothorax/CXKPT00007443_000/CXKPT00007443_000_000/CXKPT00007443_000_000_000,exclude,invalid_annotation,unknown,2026-09-16T00:00:00+00:00,2026-09-16 会議で exclude に決定,
+image,ETR_ChestMetry_PI6px_pneumothorax_add,kaggle_pneumothorax/CXKPT00007443_000/CXKPT00007443_000_000/CXKPT00007443_000_000_000,exclude,invalid_annotation,unknown,2026-09-16T00:00:00+00:00,2026-09-16 会議で exclude に決定（ANN_EIRLPRJ_01334 と同一画像）,

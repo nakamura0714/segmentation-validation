@@ -1,0 +1,9 @@
+{
+  "datasets": {
+    "exclude": [
+      "ChestMetry_PI6px_normal",
+      "PTE_CX_MT_PI3_pneumothorax",
+      "PTR_CX_MT_PI3_pneumothorax"
+    ]
+  }
+}

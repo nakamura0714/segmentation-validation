@@ -1,12 +1,48 @@
 {
   "schema_version": 2,
   "meta": {
-    "generated_at": "2026-09-15T05:25:03.278696+00:00",
+    "generated_at": "2026-09-16T15:10:53.129040+00:00",
     "dataset_name": "pi6-validation",
-    "n_annotations": 2422,
-    "n_images": 33
+    "n_annotations": 2426,
+    "n_images": 36
   },
   "decisions": [
+    {
+      "dataset_id": "ANN_EIRLPRJ_01263",
+      "geometry_uid": "5eb6f2bf-a258-41d5-969b-36ec52ca6c40",
+      "decision": "keep",
+      "reason": "visually_valid",
+      "reviewer": "unknown",
+      "reviewed_at": "",
+      "comment": ""
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01263",
+      "geometry_uid": "678100fe-30a2-4a61-a98c-7bee666177c4",
+      "decision": "keep",
+      "reason": "visually_valid",
+      "reviewer": "unknown",
+      "reviewed_at": "",
+      "comment": ""
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01263",
+      "geometry_uid": "791c34c6-9f60-4c6e-a547-982081039071",
+      "decision": "keep",
+      "reason": "visually_valid",
+      "reviewer": "unknown",
+      "reviewed_at": "",
+      "comment": ""
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01263",
+      "geometry_uid": "a4e7c759-365b-43e9-a9e1-4a3bbaebb4ac",
+      "decision": "keep",
+      "reason": "visually_valid",
+      "reviewer": "unknown",
+      "reviewed_at": "",
+      "comment": ""
+    },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
       "geometry_uid": "07aec4b2-b16f-4eff-a10d-ef5d048b3636",
@@ -14014,11 +14050,11 @@
     {
       "dataset_id": "ANN_EIRLPRJ_01334",
       "geometry_uid": "82dd52a0-db41-46bc-8e8a-df998e594b11",
-      "decision": "keep",
+      "decision": "exclude",
       "reason": "invalid_annotation",
       "reviewer": "unknown",
-      "reviewed_at": "",
-      "comment": ""
+      "reviewed_at": "2026-09-16T00:00:00+00:00",
+      "comment": "2026-09-16 会議で exclude に決定"
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01334",
@@ -21808,6 +21844,16 @@
   ],
   "image_decisions": [
     {
+      "dataset_id": "ANN_EIRLPRJ_01263",
+      "image_key": "ofuna_chuo/CXOFC00000041_004/CXOFC00000041_004_001/CXOFC00000041_004_001_002",
+      "decision": "exclude",
+      "reason": "",
+      "reviewer": "unknown",
+      "reviewed_at": "",
+      "comment": "",
+      "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01263-20260916_032022.json::ofuna_chuo/CXOFC00000041_004/CXOFC00000041_004_001/CXOFC00000041_004_001_002"
+    },
+    {
       "dataset_id": "ANN_EIRLPRJ_01272",
       "image_key": "asahikawa/CXASW00001546_000/CXASW00001546_000_000/CXASW00001546_000_000_001",
       "decision": "exclude",
@@ -22136,6 +22182,26 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::okayama_chuo/CXOKC00001821_001/CXOKC00001821_001_000/CXOKC00001821_001_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01334",
+      "image_key": "kaggle_pneumothorax/CXKPT00007443_000/CXKPT00007443_000_000/CXKPT00007443_000_000_000",
+      "decision": "exclude",
+      "reason": "invalid_annotation",
+      "reviewer": "unknown",
+      "reviewed_at": "2026-09-16T00:00:00+00:00",
+      "comment": "2026-09-16 会議で exclude に決定",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_pneumothorax_add",
+      "image_key": "kaggle_pneumothorax/CXKPT00007443_000/CXKPT00007443_000_000/CXKPT00007443_000_000_000",
+      "decision": "exclude",
+      "reason": "invalid_annotation",
+      "reviewer": "unknown",
+      "reviewed_at": "2026-09-16T00:00:00+00:00",
+      "comment": "2026-09-16 会議で exclude に決定（ANN_EIRLPRJ_01334 と同一画像）",
+      "legacy_file_uid": ""
     }
   ]
 }
