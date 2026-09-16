@@ -188,6 +188,10 @@ git管理（正本・再生成不可）              自動生成（派生物・
 元JSONのファイル名にも依存しないため（annotation は `dataset_id::geometry_uid`、
 画像は `dataset_id::institution/study/series/file_id`）。
 
+既存のJSONが新版に差し替わったときの手順は
+[`docs/review_procedure.md` 5.5](docs/review_procedure.md#55-既存のjsonが新版に差し替わったとき)。
+**新版が「施設を落としただけ」なら当てる必要が無い**ので、その見分け方もそこにある。
+
 ---
 
 ## 2. 環境構築
@@ -708,11 +712,13 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 
 | 属性 | 規則 | 実測 |
 | --- | --- | ---: |
-| `finding_labels` | `Findings` の geometry annotation の `code_text_eng` | 非空 6,680 |
-| `abnormal_finding_status` | 所見あり→`present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 6,680 / 853 / 35,041 |
+| `abnormal_finding_status` | `Findings` の geometry annotation あり→`present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 6,680 / 853 / 35,041 |
 | `pneumothorax_case` | 気胸 annotation が1件以上 | true 3,521 |
 | `bulla_bleb_status` | `bulla_bleb` があれば `present`、他は `unknown`（`absent` は出さない） | present 234 |
 | `pneumothorax_side` | 常に `null`（患者基準の解剖学的左右で、画像からは起こせない） | — |
+
+拾った所見名（`pneumothorax` / `nodule` 等16語）は**出力属性ではない**。
+テンプレートが `finding_labels` を削除したため、判定の材料と summary の語彙一覧に使うだけ。
 
 **annotation が無いことだけを理由に `absent` にはしない。** 未アノテーションと正常例を
 混同すると、未アノテーション陽性を陰性の教師信号にしてしまう。データセット名
@@ -724,15 +730,19 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 認めるかは `config.lpdata_export` の2つの allowlist（`finding_code_systems` /
 `normal_evidence`）で決まる。根拠が確認できたものだけを足していく。
 
-**生成物の不変条件**（med-chest-metry-pi6 のテンプレートが正典。実測で違反0件）:
+**ラベル属性どうしは結び付けない**（med-chest-metry-pi6 のテンプレートが正典）。
+`pneumothorax_case` は気胸アノテーション由来、`abnormal_finding_status` は読影所見由来で、
+**由来が違うので対応を課さない**。`unknown` × `pneumothorax_case: true`（気胸ラベルは
+あるが読影所見は未取得）も、`true` かつマスクが空（マスク未アノテーションの気胸症例）も
+正当な組み合わせ。
 
-- `present` ⇔ `finding_labels` が非空 / `absent`・`unknown` なら `finding_labels` は `[]`
-- **`present` / `absent` のときに限り** `pneumothorax_case == ("pneumothorax" in finding_labels)`
-- `absent` かつ `pneumothorax_case: true` は不正
-- **`unknown` のときは気胸ラベルとの対応を課さない。**
-  「気胸ラベルはあるが読影所見は未取得」（`unknown` × `true` × `[]`）は正当な組み合わせ。
-  ただし**既存 annotation だけで作る初期エクスポートでは 0件が正しい**
-  （気胸 annotation があれば必ず `present` になるため）。読影レポートCSV更新で初めて現れる
+前版はここを結び付けており、「`unknown` ⇒ `pneumothorax_case: false`」を強制していた。
+規則どおりGTを作ると**感度が黙って下がる**ため、テンプレート側が結合を外している。
+
+残る不変条件は値の範囲だけ（実測で違反0件）:
+
+- `abnormal_finding_status` / `bulla_bleb_status` は `present` / `absent` / `unknown` のいずれか
+- `pneumothorax_side` が非 null なのは `pneumothorax_case: true` のときだけ
 
 **`lung_rect` は肺野と胸郭の両方のマスクが揃ったときだけ入る。** 片方で代用すると由来の違う
 矩形が同じ属性に混ざる（テンプレートの規約）。参照マスクの実測被覆から、埋まるのは全体の

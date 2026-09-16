@@ -1,5 +1,17 @@
 # development_merged.json → lp-data 形式 JSON エクスポータ
 
+> **追記（2026-09-16）**: 実装後、med-chest-metry-pi6 のテンプレートに破壊的変更
+> （`feat(data)!: finding_labels を削除しラベルを独立属性に整理する`, `2566a09`）が入り、
+> 本プランの以下が**古くなっている**。実装は追随済みで、現在の仕様は README 3.11 を見ること。
+>
+> - `finding_labels` 属性は**削除された**（所見名は判定の材料と summary の語彙一覧にのみ使う）
+> - **ラベル属性どうしの結合が外れた。** `pneumothorax_case`（気胸アノテーション由来）と
+>   `abnormal_finding_status`（読影所見由来）は由来が違うので対応を課さない。
+>   本プランが書いた「不変条件 1〜6」はこの1点を除いてすべて消滅し、残るのは
+>   値の範囲と「`pneumothorax_side` は気胸症例のときだけ」の2つ
+> - `structure` をコード側に書き直さずテンプレートから丸写しする設計
+>   （`validate_coverage`）が、この変更を起動時に検知して止めた。設計の狙いどおり
+
 ## Context
 
 `build-dataset` が生成する `development_merged.json`（42,574画像 / 17,933 annotation / 12データセット統合）は
