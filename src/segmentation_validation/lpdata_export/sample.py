@@ -115,11 +115,6 @@ def _abnormal_finding_status(ctx: SampleContext) -> str:
     return ctx.labels.abnormal_finding_status
 
 
-def _finding_labels(ctx: SampleContext) -> list[str]:
-    # multiple: true なので、無いときは null ではなく空リスト。
-    return list(ctx.labels.finding_labels)
-
-
 def _pneumothorax_side(ctx: SampleContext) -> None:
     return ctx.labels.pneumothorax_side
 
@@ -170,7 +165,6 @@ FIELD_BUILDERS: dict[str, Callable[[SampleContext], Any]] = {
     "view_position": _view_position,
     "pneumothorax_case": _pneumothorax_case,
     "abnormal_finding_status": _abnormal_finding_status,
-    "finding_labels": _finding_labels,
     "pneumothorax_side": _pneumothorax_side,
     "bulla_bleb_status": _bulla_bleb_status,
     "pneumothorax_mask": _pneumothorax_mask,

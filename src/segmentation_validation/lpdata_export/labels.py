@@ -31,9 +31,7 @@ from ..core.records import FileGroup
 #: ``code_text_eng`` はデータセットを跨いで表記が統一されている唯一の手掛かり。
 PNEUMOTHORAX = "pneumothorax"
 
-#: ブラ / ブレブの所見名。元データは1語に結合されている（テンプレートの例は
-#: ``bulla`` / ``bleb`` と分けて書いており綴りが違う。対応付けは推測せず、
-#: 元の ``code_text_eng`` をそのまま出す。report.py が語彙一覧を出すので突き合わせる）。
+#: ブラ / ブレブの所見名。元データは1語に結合されている。
 BULLA_BLEB = "bulla_bleb"
 
 PRESENT = "present"
@@ -43,8 +41,14 @@ UNKNOWN = "unknown"
 
 @dataclass(frozen=True)
 class SampleLabels:
-    """1画像ぶんのラベル4属性。"""
+    """1画像ぶんのラベル属性。
 
+    ``finding_labels`` は**出力属性ではない**（テンプレートから削除された）。
+    ``abnormal_finding_status`` / ``pneumothorax_case`` / ``bulla_bleb_status`` を
+    決める材料として内部に持ち、summary の所見語彙一覧にも使う。
+    """
+
+    #: 拾えた所見名。出力JSONには載せない（判定の材料と summary 用）。
     finding_labels: tuple[str, ...]
     abnormal_finding_status: str
     pneumothorax_case: bool

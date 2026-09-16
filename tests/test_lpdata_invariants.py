@@ -1,13 +1,14 @@
-"""ラベル属性間の不変条件（med-chest-metry-pi6 PR #68）を守る。
+"""ラベル属性間の不変条件を守る。
 
-**条件付きである点がこのテストの主目的。** 前身の無条件版は
-「unknown ⇒ pneumothorax_case: false」を強制しており、
-「気胸ラベルはあるが読影所見は未取得」が表現できず、規則どおりGTを作ると
-**感度が黙って下がる**経路になっていた。
+正典は med-chest-metry-pi6 の `dataset_template_pneumothorax.yaml`。
+``feat(data)!: finding_labels を削除しラベルを独立属性に整理する``（2026-09-16）で
+**ラベル属性どうしの結合が外れた**ので、このテストの主目的は
+「**由来の違う属性を勝手に結び付けていないこと**」の担保になる。
 
-初期エクスポートではこの組み合わせは出ない（気胸 annotation があれば必ず present に
-なるため）。それでも検査側が許容することをここで固定しておかないと、後日の
-読影レポートCSV更新処理を入れた瞬間に正当なデータが違反扱いになる。
+前版は結び付けており、「unknown ⇒ pneumothorax_case: false」を強制していた。
+規則どおりGTを作ると**感度が黙って下がる**経路で、テンプレート側もそれを理由に
+結合を外している。ここで「正当な組み合わせが違反にならない」ことを固定しておかないと、
+後日の読影レポートCSV更新を入れた瞬間に正当なデータが違反扱いになる。
 """
 
 from __future__ import annotations
@@ -17,87 +18,102 @@ import pytest
 from segmentation_validation.lpdata_export.invariants import check_sample, check_samples
 
 
-def sample(status, labels, case):
-    return {
-        "abnormal_finding_status": status,
-        "finding_labels": list(labels),
-        "pneumothorax_case": case,
+def sample(**overrides):
+    base = {
+        "abnormal_finding_status": "unknown",
+        "pneumothorax_case": False,
+        "pneumothorax_side": None,
+        "bulla_bleb_status": "unknown",
     }
+    return base | overrides
 
 
 def rules(violations):
     return {v.rule for v in violations}
 
 
-# ------------------------------------------------- 初期エクスポートで出る形
+# ------------------------------------------------- 結合しないことの担保
 
 
 @pytest.mark.parametrize(
-    "status,labels,case",
+    "status,case",
     [
-        ("present", ["pneumothorax"], True),
-        ("present", ["pneumothorax", "nodule"], True),
-        ("present", ["nodule"], False),
-        ("absent", [], False),
-        ("unknown", [], False),
+        ("present", True),
+        ("present", False),
+        ("absent", False),
+        ("unknown", False),
+        # ★どちらもテンプレートが明示的に正当とする組み合わせ。
+        #   気胸の有無は気胸アノテーション由来、所見の有無は読影所見由来で、由来が違う。
+        ("unknown", True),
+        ("absent", True),
     ],
     ids=[
         "present×気胸",
-        "present×気胸と他所見",
-        "present×気胸以外",
+        "present×気胸なし",
         "absent",
         "unknown",
+        "unknown×気胸（読影所見が未取得）",
+        "absent×気胸（由来が違うので結び付けない）",
     ],
 )
-def test_初期エクスポートで出る組み合わせは違反しない(status, labels, case):
-    assert check_sample("s", sample(status, labels, case)) == []
+def test_statusとcaseの組み合わせは結び付けない(status, case):
+    assert (
+        check_sample(
+            "s", sample(abnormal_finding_status=status, pneumothorax_case=case)
+        )
+        == []
+    )
 
 
-# --------------------------------------------------------- PR #68 の核心
-
-
-def test_unknownかつpneumothorax_case_trueかつfinding_labels空は違反にしない():
-    """★「気胸ラベルはあるが読影所見は未取得」。公開データセットではこれが主になる。
-
-    初期エクスポートでは出ないが、後日のCSV更新処理が出せる形。
-    """
-    assert check_sample("s", sample("unknown", [], True)) == []
-
-
-def test_presentのときだけ気胸ラベルの対応を課す():
-    # present で気胸ラベルが無いのに case が真 → 違反
-    assert rules(check_sample("s", sample("present", ["nodule"], True))) == {
-        "4: present/absent 時の気胸ラベル対応"
+def test_マスク未アノテーションの気胸症例は正当():
+    """``pneumothorax_case: true`` かつマスクが空、はテンプレートが明示的に認める形。"""
+    entry = sample(pneumothorax_case=True) | {
+        "pneumothorax_mask": {"pixel_array": None}
     }
-    # 同じ不一致でも unknown なら課さない（finding_labels は空なので1/2/3も無違反）
-    assert check_sample("s", sample("unknown", [], True)) == []
+
+    assert check_sample("s", entry) == []
 
 
-# ----------------------------------------------------------------- 違反検出
+# ------------------------------------------------------------ 値の範囲
 
 
-def test_absentかつpneumothorax_case_trueは違反として検出される():
-    """正常と判定されているのに気胸症例、という組み合わせは不正。"""
-    found = rules(check_sample("s", sample("absent", [], True)))
-    assert "5: absent かつ pneumothorax_case: true は不正" in found
-    assert "4: present/absent 時の気胸ラベル対応" in found
+@pytest.mark.parametrize("key", ["abnormal_finding_status", "bulla_bleb_status"])
+def test_label_map外の値は違反(key):
+    assert "label_map 外の値" in rules(check_sample("s", sample(**{key: "normal"})))
 
 
-def test_presentなのにfinding_labelsが空なら違反():
-    assert "1: present ⇔ finding_labels 非空" in rules(
-        check_sample("s", sample("present", [], False))
+@pytest.mark.parametrize("value", ["present", "absent", "unknown"])
+def test_3値はすべて通る(value):
+    assert check_sample("s", sample(abnormal_finding_status=value)) == []
+    assert check_sample("s", sample(bulla_bleb_status=value)) == []
+
+
+# --------------------------------------------------- pneumothorax_side
+
+
+def test_気胸症例ならsideを持ってよい():
+    assert (
+        check_sample("s", sample(pneumothorax_case=True, pneumothorax_side="left"))
+        == []
     )
 
 
-@pytest.mark.parametrize("status", ["absent", "unknown"])
-def test_present以外でfinding_labelsが非空なら違反(status):
-    assert "1/2/3: present 以外は finding_labels 空" in rules(
-        check_sample("s", sample(status, ["nodule"], False))
+def test_気胸症例でないのにsideがあれば違反():
+    """由来の違う情報が紛れ込んでいる印。"""
+    found = rules(
+        check_sample("s", sample(pneumothorax_case=False, pneumothorax_side="left"))
     )
 
+    assert "pneumothorax_side は気胸症例のときだけ" in found
 
-def test_label_map外の値は違反():
-    assert "label_map 外の値" in rules(check_sample("s", sample("normal", [], False)))
+
+def test_sideの値が範囲外なら違反():
+    """患者から見た解剖学的左右。``L`` や ``both`` は受けない。"""
+    found = rules(
+        check_sample("s", sample(pneumothorax_case=True, pneumothorax_side="both"))
+    )
+
+    assert "pneumothorax_side の値" in found
 
 
 # ------------------------------------------------------------------ 使い勝手
@@ -110,10 +126,11 @@ def test_ラベル属性を持たないサンプルは検査対象外():
 
 def test_check_samplesはdictでもペアの列でも受ける():
     samples = {
-        "ok": sample("present", ["nodule"], False),
-        "ng": sample("absent", [], True),
+        "ok": sample(),
+        "ng": sample(pneumothorax_case=False, pneumothorax_side="right"),
     }
     from_dict = check_samples(samples)
     from_pairs = check_samples(iter(samples.items()))
+
     assert [str(v) for v in from_dict] == [str(v) for v in from_pairs]
     assert {v.sample_id for v in from_dict} == {"ng"}

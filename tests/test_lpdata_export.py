@@ -66,12 +66,15 @@ def test_structureの全キーがサンプルに存在する(tmp_path: Path):
     assert sorted(sample) == TEMPLATE_KEYS
 
 
-def test_finding_labelsだけがリストになる(tmp_path: Path):
-    """``multiple: false`` の属性値はリストにしない。"""
+def test_リストになる属性は無い(tmp_path: Path):
+    """現テンプレートに ``multiple: true`` の属性は無い。
+
+    ``finding_labels`` が削除されたことで、リスト値を持つ属性は1つも無くなった。
+    ``multiple: false`` の属性値をリストにすると lp-data が弾く。
+    """
     sample = build_sample(context(tmp_path))
 
-    lists = {k for k, v in sample.items() if isinstance(v, list)}
-    assert lists == {"finding_labels"}
+    assert [k for k, v in sample.items() if isinstance(v, list)] == []
 
 
 def test_マスクなしでも属性は消えずpixel_array_nullになる(tmp_path: Path):
@@ -389,11 +392,12 @@ def test_ラベルのある画像とない画像が別々に判定される(tmp_
     samples = read_dataset(options.out_path)["samples"]
     assert samples["F1"]["abnormal_finding_status"] == "present"
     assert samples["F1"]["pneumothorax_case"] is True
-    assert samples["F1"]["finding_labels"] == ["pneumothorax"]
     # annotation が無いだけでは absent にしない。
     assert samples["F2"]["abnormal_finding_status"] == "unknown"
-    assert samples["F2"]["finding_labels"] == []
+    assert samples["F2"]["pneumothorax_case"] is False
     assert result.status_counts == {"present": 1, "unknown": 1}
+    # 所見語彙は出力属性ではないが、summary 用に集計されている。
+    assert result.finding_vocabulary == {"pneumothorax": 1}
 
 
 def test_統合JSONのfile単位dataset_idが引き当てに使われる(tmp_path: Path):
