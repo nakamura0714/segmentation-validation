@@ -14,6 +14,11 @@ dependencies = [
     "pandas>=3.0.5",
     "pillow>=12.3.0",
     "pydicom>=3.0.2",
+    # pydicom 本体は非圧縮しか展開できない。実データには JPEG Lossless
+    # (Process 14 SV1, 1.2.840.10008.1.2.4.70) の DICOM が 444 件あり、
+    # これが無いと export-lpdata の画像変換がその分だけ失敗する。
+    "pylibjpeg>=2.0",
+    "pylibjpeg-libjpeg>=2.1",
     # export-lpdata がデータセットテンプレート（med-chest-metry-pi6 の YAML）を読むため。
     # 出力は JSON なので、書き出し側では使わない。
     "pyyaml>=6.0",

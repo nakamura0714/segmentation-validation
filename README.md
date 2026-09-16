@@ -741,7 +741,13 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 **判断が要るものは `lpdata_export_summary.md` に出る**（allowlist に入っていない正常らしき
 ラベル、気胸データセット名なのに気胸 annotation が0件のもの、所見語彙の一覧）。
 
-> ⚠️ 画像変換は全件で uint16 生データ 251 GiB を読み、PNG を約 113 GiB 書く。
+**出力は必ず 16bit グレースケール PNG。** 元DICOMのうち 444件は画素が
+JPEG Lossless（`1.2.840.10008.1.2.4.70`）で圧縮されており、これを読むために
+`pylibjpeg` / `pylibjpeg-libjpeg` を依存に入れてある（無いと該当分だけ
+`RuntimeError` で変換できず `image_file: null` になる）。**圧縮方式は元DICOM側の話**で、
+書き出しは全件 `cv2.imwrite` による PNG。JPEG Lossless は可逆なので画素も失われない。
+
+> ⚠️ 画像変換は全件で uint16 生データ 251 GiB を読み、PNG を約 127 GiB 書く。
 > 既存のPNGは skip するので途中で止めても再開できるが、まず `--limit` で所要時間を測ること。
 > DICOM が無い画像は `image_file: null` にして続行する（**空画像は作らない**）。
 > 変換処理は med-chest-metry-pi6 の `dataprep/dicom_to_png.py` からの移植で、
