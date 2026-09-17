@@ -763,6 +763,135 @@ JPEG Lossless（`1.2.840.10008.1.2.4.70`）で圧縮されており、これを�
 > 変換処理は med-chest-metry-pi6 の `dataprep/dicom_to_png.py` からの移植で、
 > 既存PNG（med-dicom 経由）と画素値が一致するかは未確認（向こうの Issue #27）。
 
+### 3.12 読影レポート由来のデータを足す（OFC）
+
+大船中央の構造化読影レポートを結合した engineer-set JSON
+（[ofuna_chuo_report](/mnt/project/chest/metry/pi6/work/nakamura/ofuna_chuo_report)
+が出力する `engineer-set-ETR_ChestMetry_OFC_report-*.json`）を取り込む。
+
+**価値は「マスクが無くても気胸症例だと分かる」こと。** レポートで気胸ありと
+判定された 4,534 study のうち気胸マスクを持つのは 397 study しかない。
+3.11 の経路は気胸 annotation の有無だけで `pneumothorax_case` を決めるので、
+この差分がまるごと取りこぼされている。
+
+3段階で実行する。**統合は2つの lp-data JSON を作ってから行う**ので、
+統合前に件数と裁定結果を確認できる。
+
+```bash
+TAG=20260917; OUT=output/lpdata/$TAG
+OFC=../ofuna_chuo_report/output/dataset/merged/engineer-set-ETR_ChestMetry_OFC_report-20260917_004313.json
+
+# 1) OFC 側を lp-data 形式へ（★ マスク出力先を development と分ける。下の警告参照）
+uv run segmentation-validation export-lpdata-ofc --source "$OFC" \
+    --out $OUT/ofc_report.lpdata.json --artifact-prefix ofc_ \
+    --mask-output-dir $OUT/masks/pneumothorax_ofc \
+    --image-mode convert --mask-mode generate --jobs 16 \
+    --dataset-name chest_metry_pi6_pneumothorax \
+    --dataset-id chest_metry_pi6_pneumothorax_2026_003 --owner <あなた>
+
+# 2) 統合の下見（JSONは書かない）。ここで裁定を人が確認する
+uv run segmentation-validation merge-lpdata \
+    --primary output/lpdata/20260916/chest_metry_pi6_pneumothorax.json \
+    --secondary $OUT/ofc_report.lpdata.json \
+    --out $OUT/chest_metry_pi6_pneumothorax.json --dry-run
+cat $OUT/lpdata_merge_summary.md
+
+# 3) 本番の統合
+uv run segmentation-validation merge-lpdata ... （--dry-run を外す）
+```
+
+> ⚠️ **OFC 段には必ず別の `--mask-output-dir` を与えること。**
+> マスクのファイル名は `<sample_id>.png` で、development と置き場を共有すると
+> **人手で整備したGTマスクを黙って差し替える**（実測で6件、両者のマスクが食い違う）。
+> `merge-lpdata` は重複時に必ず primary のマスクを採り、食い違いを summary に出す。
+> `--artifact-prefix` も同じ理由（summary / manifest / 計測キャッシュの潰し合いを防ぐ）。
+
+#### 取り込む範囲
+
+既定は `pneumothorax_status` が `present` / `absent` のものだけ（実測 6,823画像）。
+`unknown` の 178,096画像は**入れない** —— レポートの `pneumothorax_case: false` は
+「気胸でない」ではなく「**主張していない**」の意味で、入れると未検証の陰性を
+17万件ぶん教師信号にすることになる。
+
+範囲は `config.lpdata_export.report_label_statuses` か `--report-status` で広げられる。
+**除外した分も `ofc_report_labels.csv` に `in_scope: False` で残る**ので、
+広げる前に確信度別の内訳を確認できる。
+
+#### `pneumothorax_case` の根拠（`false` は2種類ある）
+
+優先順位は **明示的な陰性/陽性GT > 読影レポート > annotation/mask が無いだけの未確認状態**。
+
+| 根拠 | 意味 | レポートで動くか |
+| --- | --- | --- |
+| `explicit_positive_annotation` | 気胸 annotation / mask がある | **動かない**（降格しない） |
+| `explicit_negative_normal` | `No Findings/normal` が明示されている | **動かない** |
+| `explicit_negative_report` | レポートが在り、気胸含め陽性所見が無いと確認できた | 動かない（根拠のみ格上げ） |
+| `unconfirmed` | 気胸 annotation / mask が無いだけ。**陰性ではない** | レポートが `present` なら `true` へ補完 |
+
+**「明示的な陰性」と認めるのは2つだけ** —— annotation 側の `No Findings/normal` と、
+「レポートが在り陽性所見が0件」。**他の所見がアノテーション済みであることは
+陰性根拠にしない**（その画像について気胸を否定したのではなく、付けていないだけ）。
+レポート未取得・`unknown`・ヘッジされた否定も根拠にしない。
+データセット名（`*_abnormal_non_pneumothorax` 等）も従来どおり根拠にしない。
+
+食い違ったものは**上書きせず** `lpdata_merge_resolutions.json` と summary に出る。
+
+#### 根拠は `meta.provenance.case_evidence` で引き継ぐ
+
+`case_evidence` はテンプレートに無い属性なのでサンプルには載せられない
+（`validate_coverage` が弾く）。そのままだと統合側が根拠を見られないので、
+**明示的な気胸陰性の `sample_id` を `meta.provenance.case_evidence` に列挙する**。
+`export-lpdata` / `export-lpdata-ofc` の**どちらも常に書く**。
+
+```json
+"case_evidence": {
+  "schema_version": 1,
+  "explicit_negative_normal": ["...", ...],   // 実測 880 件
+  "explicit_negative_report": ["...", ...]
+}
+```
+
+> ⚠️ **`abnormal_finding_status` を気胸陰性の代理に使わないこと。**
+> あれは「気胸以外も含む異常所見の有無」で、意味が違う。他の所見が併存すると
+> `present` になり、明示的な正常ラベルがあっても隠れる —— 実測で明示的陰性
+> 880件のうち **167件（19%）がこの形**で、代用すると保護漏れになる。
+
+`case_evidence` を持たないJSON（この節を入れる前に作った出力）を `--primary` に
+渡すと **`merge-lpdata` はエラーで止まる**。`export-lpdata` を再実行して作り直すか、
+ラベル補強が不要なら `--no-enrich` を付ける。再 export は計測キャッシュと既存PNGを
+再利用するので数十秒で終わる（**`--force` は付けない**）。
+
+#### 確信度（certainty）は学習GTではない
+
+`definite` / `probable` / `possible` / `unlikely` は**層別評価・分析のためのメタ情報**で、
+**判定条件には一切使わない**。`pneumothorax_status` が `present` なら `unlikely` でも
+`pneumothorax_case: true` にする（上流 `ofuna_chuo_report` の `labels/rules.py` も
+「規則と certainty は分離されている」と明記しており、それに揃えている）。
+
+最終JSONに certainty 属性は**足さない**（テンプレートに無い属性を足すと
+`validate_coverage` が落ちる。これが構造的な歯止めになっている）。
+代わりに捨てずに残す先が3つある。
+
+| 出力 | 中身 |
+| --- | --- |
+| `ofc_report_labels.csv` | 1行1サンプル。`sample_id` / `study_name` / `pneumothorax_status` / `pneumothorax_certainty_max` / `*_certainty_counts` / `case_evidence` / `flags` ほか。**範囲外の分も含む全 184,919行** |
+| `meta.provenance.report_labels` | 確信度の分布と `certainty_is_metadata: true` |
+| `lpdata_merge_resolutions.json` | 裁定1件ごと。certainty は参考値で、`certainty_used_in_resolution: false` |
+
+#### 実測（20260916 の development と統合した場合）
+
+| 指標 | 値 |
+| --- | ---: |
+| OFC 取り込み対象 / うち重複 / 新規 | 6,823 / 577 / 6,246 |
+| 統合後のサンプル数 | 22,931 |
+| `pneumothorax_case: true` | 7,847（既存 3,358 + 補完 70 + OFC新規 4,419） |
+| **うちマスク無し** | **4,489**（現行の出力では0件） |
+| `pneumothorax_side` 補完 | 335 |
+| `bulla_bleb_status` 補完 | 8 |
+| 上書きしなかった食い違い | 3（明示的陰性2 + 降格拒否1） |
+| 気胸マスクの食い違い | 6（primary を採用） |
+| 不変条件違反 | 0 |
+
 ---
 
 ## 4. 成果物の読み方
@@ -1426,4 +1555,7 @@ review build / launch / status              目視レビュー
 review export / import / precision          判定の往復と答え合わせ
 review migrate-decisions                    目視判定を git 管理の正本へ移す（移行時に一度）
 build-dataset                               development.json × 12 + development_merged.json
+export-lpdata                               統合JSON → lp-data 形式（既存 annotation 由来のラベル）
+export-lpdata-ofc                           読影レポート付き engineer-set → lp-data 形式
+merge-lpdata                                2つの lp-data JSON を統合（--dry-run で裁定だけ確認）
 ```

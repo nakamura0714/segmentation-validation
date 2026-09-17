@@ -515,3 +515,87 @@ def test_元データ間の属性の食い違い(merged):
     assert len(conflict["values"]) == 2
     # 採用側は決定的（dataset_id 昇順の先頭）。
     assert conflict["adopted"] == min(conflict["values"])
+
+
+# --- lp-data エクスポートと統合の既知値 ------------------------------------
+#
+# 出力ファイルを読む（コードの再実行ではない）。この3ファイルが揃っていない
+# 環境では skip する。
+
+
+LPDATA_DEV = "output/lpdata/20260916/chest_metry_pi6_pneumothorax.json"
+LPDATA_OFC = "output/lpdata/20260917/ofc_report.lpdata.json"
+LPDATA_MERGED = "output/lpdata/20260917/chest_metry_pi6_pneumothorax.json"
+
+
+def _load(path: str) -> dict:
+    import json
+    from pathlib import Path
+
+    from segmentation_validation.config import PROJECT_ROOT
+
+    target = Path(PROJECT_ROOT) / path
+    if not target.is_file():
+        pytest.skip(f"出力が無い: {path}")
+    return json.loads(target.read_text(encoding="utf-8"))
+
+
+def test_明示的な気胸陰性の件数():
+    """``abnormal_finding_status`` では代用できないことの実データ側の証拠。
+
+    880件のうち167件は ``status`` が ``present`` なので、旧実装の
+    ``status == "absent"`` ガードでは19%を取りこぼしていた。
+    """
+    dataset = _load(LPDATA_DEV)
+    evidence = dataset["meta"]["provenance"]["case_evidence"]
+    ids = set(evidence["explicit_negative_normal"])
+    samples = dataset["samples"]
+
+    assert len(ids) == 880
+    blind = [k for k in ids if samples[k]["abnormal_finding_status"] == "present"]
+    assert len(blind) == 167
+    # 陽性は列挙しない（pneumothorax_case: true で自明）。
+    assert not any(samples[k]["pneumothorax_case"] for k in ids)
+
+
+def test_統合の裁定件数():
+    merged = _load(LPDATA_MERGED)
+    merge = merged["meta"]["provenance"]["merge"]
+
+    assert len(merged["samples"]) == 22931
+    assert merge["duplicates"] == 577
+    assert merge["added_from_secondary"] == 6246
+    assert merge["protected_explicit_negative"] == 880
+    assert merge["changes"]["pneumothorax_case: False -> True"] == 70
+    assert merge["mask_conflicts"] == 6
+    assert merge["identity_conflicts"] == 0
+    # 重複時は primary の画素由来の値を採る（人手整備のGTを守る）。
+    assert merge["pixel_fields_from"] == "primary"
+    # 確信度は裁定に使っていない。
+    assert merge["certainty_used_in_resolution"] is False
+
+
+def test_マスク未アノテーションの気胸症例が保持される():
+    """**今回の取り込みの成果。** 従来の出力では0件だった。"""
+    merged = _load(LPDATA_MERGED)
+    samples = merged["samples"]
+
+    cases = sum(s["pneumothorax_case"] for s in samples.values())
+    no_mask = sum(
+        1
+        for s in samples.values()
+        if s["pneumothorax_case"] and s["pneumothorax_mask"]["pixel_array"] is None
+    )
+    assert cases == 7847
+    assert no_mask == 4489
+
+
+def test_OFCの取り込み範囲():
+    ofc = _load(LPDATA_OFC)
+    report = ofc["meta"]["provenance"]["report_labels"]
+
+    assert len(ofc["samples"]) == 6823
+    assert report["out_of_scope_counts"] == {"unknown": 178096}
+    # 確信度はメタ情報であって学習GTではない。
+    assert report["certainty_is_metadata"] is True
+    assert report["certainty_max_counts"]["unlikely"] == 1

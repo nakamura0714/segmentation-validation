@@ -25,7 +25,11 @@ from segmentation_validation.checks.base import (
 from segmentation_validation.config import Config
 from segmentation_validation.core.labels import Label
 from segmentation_validation.core.measure import ROLE_MASK, MaskMeasurement, PairMeasurement
-from segmentation_validation.core.records import AnnotationRecord, FileGroup
+from segmentation_validation.core.records import (
+    AnnotationRecord,
+    FileGroup,
+    ReportLabels,
+)
 
 DATASET = "SYNTH"
 SOURCE = "synth.json"
@@ -148,6 +152,44 @@ def make_mask_measurement(
     )
 
 
+def make_report_labels(
+    *,
+    status: str = "present",
+    side: str | None = None,
+    bulla: str = "unknown",
+    observed_finding_count: int = 0,
+    certainty_max: str | None = "definite",
+    certainty_counts: tuple[tuple[str, int], ...] = (("definite", 1),),
+    evidence: str | None = "structured_positive",
+    abnormal: str = "unknown",
+    needs_review: bool = False,
+    flags: tuple[str, ...] = ("policy_pending",),
+    schema_version: int | None = 1,
+) -> ReportLabels:
+    """構造化読影レポート由来の study レベルラベル。
+
+    ``certainty_max`` / ``certainty_counts`` を既定で埋めてあるのは、
+    **判定がこれらに影響されないこと**をテストで固定するため。
+    """
+    return ReportLabels(
+        pneumothorax_status=status,
+        pneumothorax_side=side,
+        bulla_bleb_status=bulla,
+        observed_finding_count=observed_finding_count,
+        pneumothorax_evidence=evidence,
+        pneumothorax_certainty_max=certainty_max,
+        pneumothorax_certainty_counts=certainty_counts,
+        abnormal_finding_status=abnormal,
+        needs_review=needs_review,
+        flags=flags,
+        study_name=STUDY,
+        schema_version=schema_version,
+        rules_version="r1",
+        label_source="structured_report",
+        source_dataset_id="SYNTH_OFC",
+    )
+
+
 def make_group(
     records: tuple[AnnotationRecord, ...] = (),
     *,
@@ -159,6 +201,7 @@ def make_group(
     case_labels: tuple[Label, ...] = (),
     series_image_index: int = 0,
     series_image_count: int = 1,
+    report_labels: ReportLabels | None = None,
 ) -> FileGroup:
     """画像1枚。annotation を持たない画像も作れる（正常例 / 未アノテーション）。
 
@@ -188,6 +231,7 @@ def make_group(
         case_labels=case_labels,
         series_image_index=series_image_index,
         series_image_count=series_image_count,
+        report_labels=report_labels,
     )
 
 

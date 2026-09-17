@@ -298,6 +298,19 @@ class LpdataExportConfig:
     # なるため。根拠が確認できたらここに1行足す（実測で absent が 853 → 1,500 になる）。
     normal_evidence: list[str] = field(default_factory=lambda: ["No Findings/normal"])
 
+    # ``--label-source annotations+report`` のとき取り込む study の
+    # ``report_labels.pneumothorax_status``。ここに無い status の study は
+    # サンプルを1件も出さない（除外分も分析用CSVには残るので後から追える）。
+    #
+    # 既定が present/absent の2値なのは、``unknown``（実測 174,169 study /
+    # 178,096 file）の ``pneumothorax_case: false`` が「陰性」ではなく
+    # 「**主張していない**」を意味するため。入れると未検証の陰性を17万件ぶん
+    # 教師信号にしてしまう。**範囲を広げるのはここ1行の変更で済む**
+    # （コードは触らない）。
+    report_label_statuses: list[str] = field(
+        default_factory=lambda: ["present", "absent"]
+    )
+
 
 @dataclass(frozen=True)
 class Config:

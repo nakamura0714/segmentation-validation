@@ -430,6 +430,288 @@ for ds, counter in sorted(by_dataset.items()):
 `institution`まで割ると、公開データセット（Kaggle等）由来の画像が意図せず
 大量に混ざっていないかも確認できる。
 
+### 5.5 既存のJSONが新版に差し替わったとき
+
+データ管理側が不備を直して再エクスポートすると、**新しい日時スタンプ付きの別ファイル名**で
+`/mnt/medicaldb/annotation/datasets/` に置かれる。`dataset/source/` の symlink を
+張り替えるのが「差し替え」。古い実体は共有先に残るので、**新旧を突き合わせられる**。
+
+fingerprint が変わること自体の扱いは [5.3](#53-fingerprint-が変わったときデータセットを足した除外を変えた) と同じ。
+ここでは差し替え固有の話だけを書く。
+
+| # | やること | 落とし穴 |
+|---|---|---|
+| 0 | 現構成を控える | `output/`はgitignore。記録は自分で残す |
+| 1 | **何が変わったかを先に測る** | 張り替えてからでは新旧が混ざる |
+| 2 | `review export` して commit | 張り替えるとゲートの基準線が消える |
+| 3 | symlink を張り替える | **新旧を同時に置かない**／**要らない版は当てない** |
+| 4〜10 | 走査〜成果物 | 下記 |
+
+#### 0. 現構成を控える
+
+```bash
+segmentation-validation list-sources
+cat "output/cache/$(segmentation-validation show-config | grep -o 'v_[0-9a-f]*' | head -1)/manifest.json"
+```
+
+`manifest.json`の`sources`に12本の`name`/`real_path`/`size`/`sha256`が入っている。
+これが「差し替え前は何を見ていたか」の記録。
+
+#### 1. 何が変わったかを先に測る（張り替える前）
+
+新旧JSONを直接突き合わせる。使い捨てスクリプトでよい。
+
+```bash
+uv run python - <<'EOF'
+import json, collections, copy
+
+D = "/mnt/medicaldb/annotation/datasets/"
+OLD = D + "engineer-set-<id>-<旧スタンプ>.json"
+NEW = D + "engineer-set-<id>-<新スタンプ>.json"
+
+def walk(path):
+    """(画像キー -> 施設, geometry_uid -> annotation) を返す。"""
+    with open(path) as handle:
+        root = json.load(handle)["dataset"]
+    images, anns = {}, {}
+    for inst, studies in root.items():
+        for study, sd in studies.items():
+            for series, fd in (sd.get("series_list") or {}).items():
+                for fid, fe in (fd.get("file_list") or {}).items():
+                    images[f"{inst}/{study}/{series}/{fid}"] = inst
+                    for a in fe.get("annotations") or []:
+                        if a.get("geometry_uid"):
+                            anns[a["geometry_uid"]] = a
+
+    return images, anns
+
+oi, oa = walk(OLD)
+ni, na = walk(NEW)
+print(f"画像 {len(oi)} -> {len(ni)}  (消 {len(set(oi)-set(ni))} / 増 {len(set(ni)-set(oi))})")
+print(f"annotation {len(oa)} -> {len(na)}  (消 {len(set(oa)-set(na))} / 増 {len(set(na)-set(oa))})")
+
+# 消えた画像を施設別に割る。施設の全数と一致するなら「施設まるごと」
+removed = collections.Counter(oi[k] for k in set(oi) - set(ni))
+total = collections.Counter(oi.values())
+for inst, n in removed.most_common():
+    mark = "  ★施設まるごと" if n == total[inst] else ""
+    print(f"  消えた {n:5d} / その施設の全数 {total[inst]:5d}  {inst}{mark}")
+
+# ★最重要: 生き残ったUIDの中身が変わっていないか
+changed = collections.Counter()
+for g in set(oa) & set(na):
+    for f in set(oa[g]) | set(na[g]):
+        if oa[g].get(f) != na[g].get(f):
+            changed[f] += 1
+print("共通UIDで変化したフィールド:", dict(changed.most_common()) or "なし")
+EOF
+```
+
+判定:
+
+- **共通UIDの中身が変わっていない** → 生き残った目視判定はそのまま有効。増えた分だけ目視すればよい
+- **変わっている** → その`geometry_uid`の判定は無効。**ツールは気づかない**
+  （キーが同じなので黙って古い判定を適用する）。変わったUIDの一覧を残し、目視で付け直す
+
+#### 1.5 「施設を落としただけ」の新版は当てなくてよい
+
+消えた画像がその施設の全数と一致したら、**旧版からその施設を落として新版と比較する**。
+
+```python
+stripped = copy.deepcopy(old_payload)
+for inst in 消えた施設:
+    stripped["dataset"].pop(inst)
+print(stripped["dataset"] == new_payload["dataset"])   # True なら削除のみ
+```
+
+`True` なら、その新版には**施設の削除以外の修正が1件も入っていない**。
+差し替えても得るものが無く、その施設を失うだけなので、**その1本は据え置いてよい**。
+新版が共有先に出たからといって全部当てる必要はない。
+
+`False` なら削除と修正が混ざっている。修正を取るか削除を拒むかの判断が要るので、
+データ管理担当へ「この施設の削除は意図的か」を確認する
+（材料は施設名・枚数・その施設の全数と一致すること）。
+
+#### 1.6 「いったんkeepして後で除外」ができるかの見分け
+
+| 除外したのは誰か | 後から戻せるか |
+|---|---|
+| **データ管理側**（新版から消えている） | 差し替えた時点で対象から消えるので`keep`も`exclude`も付けられない。**据え置く以外に残す手は無い** |
+| **我々の側**（目視判定 / `datasets.exclude`） | いつでも戻せる |
+
+旧版と新版を**両方置くことはできない**。同じ`dataset_id`が2本になり、D05
+（クロスデータセット重複）でそのデータセットのannotationが丸ごと重複扱いになる。
+
+新版が「施設を落としただけ」のときは、この2つが一致する。**据え置いておき、落とすと
+決めた時点で差し替えれば、それがそのまま「その施設を除外する」操作になる。**
+
+なお**施設単位のkeep/excludeをツールで直接指定することはできない。**
+`datasets.exclude`はファイル名の部分一致＝データセット単位。
+`review_policy/image_decision_overrides.json`の`match`は
+`dataset_id`/`auto_decision_reason`/`image_class`/`series_image_index`だけで
+`institution`が無く、しかも`action: keep`しか効かない
+（`selection/image_decisions.py`）。施設単位でやるなら目視判定で1枚ずつ付けるか、
+コード変更が要る。
+
+#### 2. 目視判定を書き出して commit する（張り替える前）
+
+```bash
+segmentation-validation review export
+git add review/review_decisions.json review/review_decisions.csv
+git commit -m "目視: 差し替え前の判定を書き出し"
+```
+
+張り替えると fingerprint が変わり、`review build`の未export判定ゲートの基準線
+（`output/validation/<fp>/review/review_manifest.json`）が消える。基準線が無いと
+`reviewer`未入力の判定を取りこぼす（5.3の注記と同じ理由）。
+
+#### 3. symlink を張り替える
+
+1.5で「削除のみ」と分かった版は据え置く。**差し替えるのは必要な1本だけ。**
+
+```bash
+cd /mnt/project/chest/metry/pi6/dataset/source
+ln -s /mnt/medicaldb/annotation/datasets/engineer-set-<id>-<新>.json .
+rm engineer-set-<id>-<旧>.json
+```
+
+**新旧を同時に置かない**（前述のD05）。張り替えの途中で他のコマンドを打たないこと。
+
+#### 4. 新構成を確認する
+
+```bash
+segmentation-validation list-sources    # 本数が想定どおりか
+segmentation-validation show-config     # fingerprint が変わったか
+```
+
+#### 5. 走査とチェック
+
+```bash
+segmentation-validation scan --jobs 8   # 新 fingerprint なので全件
+segmentation-validation check           # --only は付けない
+```
+
+**旧 fingerprint のキャッシュを新 fingerprint のディレクトリへコピーしないこと。**
+変わっていないデータセットは`file_uid`が同じなので一見飛ばせるが、`pairs.jsonl`は
+絞り込みなしでD01〜D04に渡るため、旧版の行が残ると生き残った`geometry_uid`について
+**重複issueが二重に出る**。時間を惜しんで静かに壊すより素直に流す。
+
+#### 6. 目視判定の引き継ぎを確認する
+
+```bash
+segmentation-validation review status
+```
+
+「現在の構成に当たらない判定がN件ある（消さずに残す）」が出る。これが消えた
+annotation/画像のうち**判定が付いていたもの**。1で数えた削除数のうちどれだけが
+判定済みかを先に数えておき、**その数と一致することを確認する**。
+
+- 一致する → 正常。孤児は消さずに残す（データセットが一時的に外れただけの可能性があるため）
+- 極端に多い → `dataset_id`が変わっている疑い。元JSONのファイル名が日時以外の部分で
+  変わると`dataset_id_for()`の結果が変わり、判定が全件引き当て不能になる
+
+ログには先頭5件しか出ない。全件見たいときは`review/review_decisions.json`を
+削除された`geometry_uid`/画像キーと突き合わせる。
+
+#### 7. 採否を出す
+
+```bash
+segmentation-validation select
+```
+
+pendingの増分 = 追加されたannotation。
+
+#### 8. 増えた分だけ目視する
+
+```bash
+# flagged_for_report.csv は fp 配下なので新 fp には無い。報告待ちの控えを引き継ぐ
+cp output/validation/<旧fp>/flagged_for_report.csv output/validation/<新fp>/ 2>/dev/null
+
+df -h /mnt/project                      # ★先に空きを見る
+segmentation-validation review build    # 新 fp なのでアセットを全件書き直す
+segmentation-validation review launch
+# 目視（2章）
+segmentation-validation review export
+segmentation-validation select
+segmentation-validation review status
+```
+
+`output/validation/<fp>/review/`は実測で53GB。fingerprint世代が増えるたびに積み上がるので、
+**不要になった旧世代を先に消す**。消してよいのは`output/validation/<旧fp>/`と
+`output/cache/<旧fp>/`。正本（`review/review_decisions.json`、
+`review_policy/image_decision_overrides.json`）はgit側にある。
+
+#### 9. 成果物を作り直す
+
+```bash
+segmentation-validation report
+segmentation-validation gui
+segmentation-validation build-dataset --version-tag <新しいタグ>
+segmentation-validation export-lpdata \
+    --image-output-dir output/lpdata/<前の版>/images \
+    ...   # 他は README 3.11 と同じ
+```
+
+- **`--version-tag`は必ず新しくする。** `output/lpdata/<tag>/measurements.jsonl`のキーは
+  `development_merged.json::inst/study/series/file`で、**差し替えを跨いで同じ値になる**。
+  同じタグを使い回すと、annotationが増減した画像でも古い導出値と古い結合マスクを黙って拾う
+- **`--image-output-dir`は前の版を指してよい。** PNG名はDICOMのファイル名stemそのもので、
+  中身もDICOMだけで決まる。既存PNGはskipされるので113GiBの再変換を丸ごと回避できる。
+  逆に`masks/pneumothorax/`はannotation由来なので**使い回してはいけない**
+- 消えた画像のPNGは参照されなくなるが残る。JSONには出ないので害は無い。容量が要るときだけ、
+  出力JSONの`sample_id`集合と突き合わせて消す
+
+#### 10. 既知値テストを更新して commit する
+
+```bash
+uv run pytest -m realdata
+```
+
+`POPULATION`/`ANNOTATED_IMAGES`/`EXPECTED_ISSUES`/`EXPECTED_ZERO`が必ず落ちる。
+**落ちること自体は正常。** 1で測った増減と照らして変化が説明できることを確認してから
+新しい実測値へ更新し、**どの差し替えでどう変わったかを行コメントで残す**
+（既存の`★2026-09-09に対象が3データセットから12へ増えた`と同じ様式）。
+
+```bash
+git add review/review_decisions.json review/review_decisions.csv \
+        tests/test_realdata_known_values.py
+git commit -m "<id> を <日付> 版へ差し替え"
+```
+
+#### やってはいけないこと
+
+1. **新旧のsymlinkを同時に置く** — D05でそのデータセットが丸ごと重複扱いになる
+2. **旧fingerprintのキャッシュを新fingerprintへコピーする** — `pairs.jsonl`が
+   絞り込みなしでD01〜D04に渡るので、重複issueが二重に出る
+3. **`build-dataset`/`export-lpdata`で同じ`--version-tag`を使い回す** —
+   `measurements.jsonl`が古い導出値を返す（`--image-output-dir`だけは例外で使い回してよい）
+4. **`review export`より先に`review build`を走らせる** — 未export判定ゲートの基準線が
+   新fingerprintには無いので、`reviewer`未入力の判定を取りこぼす
+
+### 2026-09 実例: 3本の新版のうち2本は当てなかった
+
+2026-09-15に共有先へ3本の新版が置かれた。1と1.5の手順で測った結果:
+
+| dataset | 新版の中身（実測） | 判断 |
+|---|---|---|
+| `ChestMetry_PI6px_normal` | 旧版 − `fukui_sekijuji` 31枚（この施設の全数）。**他は完全一致** | **据え置き** |
+| `ETR_ChestMetry_PI6px_with_mask136` | 旧版 − `jsrt` 3枚（この施設の全数）。**他は完全一致** | **据え置き** |
+| `ETR_ChestMetry_PI6px_abnormal_non_pneumothorax` | annotation +4,509 / −623、画像 −557 / +9。消えた画像は10施設に散在 | 差し替え対象 |
+
+- 前2本は`旧版 − 該当施設 == 新版`が`True`で、`version_id`/`version_date`も
+  `2.2`/`2026-05-19`のまま。**施設の削除以外の修正が1件も入っていない**ため、
+  当てる理由が無い。福井赤十字を残す方針だったので据え置いた
+- 落とすと決めた時点で`normal`を20260915版へ差し替えれば、それがそのまま
+  「福井赤十字を除外する」操作になる
+- 3本目は削除が10施設に散っている（`segmed` 224 / `tokyo_medical` 177 /
+  `ishikawa_health_service` 79 ほか）ので「残す」選択ができない。annotation +4,509と
+  引き換えに557枚を失う点をデータ管理担当と握ってから当てる
+- 3本とも**共通`geometry_uid`のフィールドは1件も変化していない**（file階層・study階層とも）。
+  再エクスポートはleafの追加・削除だけで、既存annotationの書き換えは起きていなかった
+- 孤児の見込み（6で照合する数）: `abnormal_non_pneumothorax`はこのデータセットの
+  目視判定が0件なので**孤児0件**。将来`with_mask136`を当てる場合は消える5件のうち
+  **2件が孤児**、`normal`は判定0件なので**0件**
+
 ### 2026-09 実例: PTE/PTRの二重エクスポート
 
 参考として、実際に遭遇した事例を残す。

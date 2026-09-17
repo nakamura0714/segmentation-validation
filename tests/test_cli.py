@@ -69,3 +69,80 @@ def test_only_datasetは繰り返し指定できる():
     )
 
     assert args.only_dataset == ["A", "B"]
+
+
+def test_export_lpdata_ofcがサブコマンドとして登録されている():
+    """共有パーサ（``parents=``）で既存のフラグを引き継いでいること。
+
+    20個超のオプションを2か所で書くと必ず片方だけ更新されて drift する。
+    """
+    from segmentation_validation.cli import _export_lpdata_ofc, build_parser
+
+    args = build_parser().parse_args(
+        [
+            "export-lpdata-ofc",
+            "--source",
+            "ofc.json",
+            "--report-status",
+            "present",
+            "--report-status",
+            "absent",
+            "--artifact-prefix",
+            "ofc_",
+        ]
+    )
+
+    assert args.command == "export-lpdata-ofc"
+    assert args.report_status == ["present", "absent"]
+    assert args.artifact_prefix == "ofc_"
+    # 共有パーサ由来の既定値が export-lpdata と揃っていること。
+    assert args.image_mode == "convert"
+    assert args.mask_mode == "planned"
+    assert args.path_style == "relative"
+    assert callable(_export_lpdata_ofc)
+
+
+def test_report_statusを指定しなければconfigの既定が使われる():
+    """既定は present / absent。``unknown`` を既定に入れると
+    「主張していない」が陰性の教師信号になる。
+    """
+    from segmentation_validation.config import Config
+
+    assert Config().lpdata_export.report_label_statuses == ["present", "absent"]
+
+
+def test_merge_lpdataがサブコマンドとして登録されている():
+    from segmentation_validation.cli import _merge_lpdata, build_parser
+
+    args = build_parser().parse_args(
+        [
+            "merge-lpdata",
+            "--primary",
+            "a.json",
+            "--secondary",
+            "b.json",
+            "--out",
+            "c.json",
+            "--dry-run",
+        ]
+    )
+
+    assert args.command == "merge-lpdata"
+    assert args.dry_run is True
+    assert args.no_enrich is False
+    assert callable(_merge_lpdata)
+
+
+def test_全サブコマンドにhandlerがある():
+    """``build_parser`` と ``main`` の handlers のずれを機械的に検出する。"""
+    import argparse
+
+    from segmentation_validation.cli import HANDLERS, build_parser
+
+    parser = build_parser()
+    subparsers = [
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ][0]
+    assert set(subparsers.choices) == set(HANDLERS)

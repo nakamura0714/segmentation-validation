@@ -19,7 +19,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from typing import Iterable
 
 from ..core.labels import Label
@@ -39,6 +40,32 @@ ABSENT = "absent"
 UNKNOWN = "unknown"
 
 
+class CaseEvidence(StrEnum):
+    """``pneumothorax_case`` の値が**何を根拠にしているか**。
+
+    ``false`` には「陰性だと分かっている」と「確認できていない」の2種類があり、
+    従来はどちらも同じ ``false`` に潰れていた。**読影レポートで補完してよいのは
+    後者だけ**なので、両者を区別する。
+
+    優先順位は **明示的な陰性/陽性GT > レポート > 未確認**。
+
+    ⚠️ **出力属性ではない。** テンプレートに無い属性を足すと
+    ``template.validate_coverage`` が落ちる（それが意図した歯止め）。
+    分析用CSVと統合の裁定一覧にだけ出す。
+    """
+
+    #: 気胸 annotation / mask がある。**レポートで覆さない。**
+    EXPLICIT_POSITIVE_ANNOTATION = "explicit_positive_annotation"
+    #: ``normal_evidence`` の明示ラベルがある。**レポートで覆さない。**
+    EXPLICIT_NEGATIVE_NORMAL = "explicit_negative_normal"
+    #: レポートが在り、気胸を含め陽性の異常所見が無いことを確認できた。
+    EXPLICIT_NEGATIVE_REPORT = "explicit_negative_report"
+    #: 未確認だったところへレポートの ``present`` を適用した。
+    REPORT_POSITIVE = "report_positive"
+    #: 気胸 annotation / mask が無いだけ。**陰性ではない。**
+    UNCONFIRMED = "unconfirmed"
+
+
 @dataclass(frozen=True)
 class SampleLabels:
     """1画像ぶんのラベル属性。
@@ -53,12 +80,27 @@ class SampleLabels:
     abnormal_finding_status: str
     pneumothorax_case: bool
     bulla_bleb_status: str
-    #: 常に None。テンプレートは**患者基準の解剖学的左右**と明記しており、
-    #: 画像座標から起こすと全サンプルが反転する。後日のCSV更新処理の担当。
-    pneumothorax_side: None = None
+    #: 気胸の側（``left`` / ``right`` / ``bilateral``）。**既存 annotation からは
+    #: 作らない**（テンプレートは患者基準の解剖学的左右と明記しており、画像座標から
+    #: 起こすと全サンプルが反転する）。値が入るのは構造化読影レポート経由だけ。
+    pneumothorax_side: str | None = None
     #: ``absent`` の根拠になったラベル（``"<code_system>/<code_text_eng>"``）。
     #: 判定の説明用で、出力JSONには載せない。
     normal_evidence_hits: tuple[str, ...] = field(default=())
+    #: ``pneumothorax_case`` が何を根拠にしているか。**出力JSONには載せない。**
+    #: レポートで補完してよいかをこれで判断する（``UNCONFIRMED`` のときだけ）。
+    case_evidence: CaseEvidence = CaseEvidence.UNCONFIRMED
+
+    def with_case(
+        self,
+        *,
+        pneumothorax_case: bool,
+        case_evidence: CaseEvidence,
+    ) -> "SampleLabels":
+        """``pneumothorax_case`` と根拠だけを差し替えた複製を返す。"""
+        return replace(
+            self, pneumothorax_case=pneumothorax_case, case_evidence=case_evidence
+        )
 
 
 def qualified(label: Label) -> str:
@@ -116,6 +158,18 @@ def build_labels(
     # 後日のCSV更新処理が出せるように依存を作らない。
     pneumothorax_case = PNEUMOTHORAX in findings
 
+    # --- case_evidence: false が「陰性」か「未確認」かを分ける ---
+    # **annotation が無いだけの false を陰性と呼ばない。** ここを潰すと、
+    # 読影レポートによる補完が「確認済みの陰性」まで上書きしてしまう。
+    # 他の所見がアノテーション済みであることは**気胸についての陰性根拠ではない**
+    # （その画像について気胸を否定したのではなく、単に付けていないだけ）。
+    if pneumothorax_case:
+        case_evidence = CaseEvidence.EXPLICIT_POSITIVE_ANNOTATION
+    elif hits:
+        case_evidence = CaseEvidence.EXPLICIT_NEGATIVE_NORMAL
+    else:
+        case_evidence = CaseEvidence.UNCONFIRMED
+
     # --- bulla_bleb_status: present か unknown だけ ---
     # ``absent`` は出さない。bulla / bleb がアノテーション対象だったかを既存
     # annotation からは判定できず、「無い」と「対象外」を区別する根拠が無いため。
@@ -127,4 +181,5 @@ def build_labels(
         pneumothorax_case=pneumothorax_case,
         bulla_bleb_status=bulla_bleb_status,
         normal_evidence_hits=hits,
+        case_evidence=case_evidence,
     )

@@ -337,6 +337,18 @@ def finding(code_text_eng: str, code: str = "010") -> dict:
     }
 
 
+def normal_label() -> dict:
+    """``normal_evidence`` の既定 allowlist に一致する明示的な正常ラベル。"""
+    return {
+        "label_id": 2,
+        "code": "001",
+        "code_system": "No Findings",
+        "code_text": "正常",
+        "code_text_eng": "normal",
+        "confidence": None,
+    }
+
+
 def make_merged(tmp_path: Path) -> Path:
     """気胸ありの DS_A と、annotation を持たない DS_B。"""
     path = merge_sources(
@@ -516,3 +528,237 @@ def test_気胸データセット名の判定はnon_pneumothoraxを除く(datase
     from segmentation_validation.lpdata_export.export import _named_pneumothorax
 
     assert _named_pneumothorax(dataset_id) is expected
+
+
+# ------------------------------------------------- 読影レポート由来のラベル
+
+
+def patch_report_labels(path: Path, by_study: dict[str, dict]) -> None:
+    """統合JSONの study に ``report_labels`` を足す。
+
+    ``ofuna_chuo_report`` が名前空間キーとして足すのと同じ形。
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for studies in payload["dataset"].values():
+        for study_key, study in studies.items():
+            labels = by_study.get(study_key)
+            if labels is not None:
+                study["report_labels"] = labels
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+def report_labels(
+    status: str = "present",
+    *,
+    side: str | None = None,
+    certainty: str | None = "definite",
+    observed: list[str] | None = None,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "rules_version": "r1",
+        "label_source": "structured_report",
+        "source_dataset_id": "OFC_SRC",
+        "pneumothorax_status": status,
+        "pneumothorax_case": status == "present",
+        "pneumothorax_side": side,
+        "pneumothorax_evidence": "structured_positive",
+        "pneumothorax_certainty_max": certainty,
+        "pneumothorax_certainty_counts": {certainty: 1} if certainty else {},
+        "bulla_bleb_status": "unknown",
+        "abnormal_finding_status": "unknown",
+        "finding_labels_observed": observed or [],
+        "flags": ["policy_pending"],
+        "needs_review": False,
+    }
+
+
+def make_report_merged(tmp_path: Path, by_study: dict[str, dict]) -> Path:
+    """気胸 annotation を持たない2画像に ``report_labels`` を付けた統合JSON。"""
+    path = merge_sources(
+        tmp_path,
+        {
+            "DS_A": {"inst": {"ST1": {"SE1": {"F1": []}}}},
+            "DS_B": {"inst": {"ST2": {"SE2": {"F2": []}}}},
+        },
+    )
+    patch_annotations(path)
+    patch_report_labels(path, by_study)
+    return path
+
+
+def test_report_labelsがFileGroupまで運ばれる(tmp_path: Path):
+    from segmentation_validation.adapters.engineer_set import EngineerSetAdapter
+
+    path = make_report_merged(tmp_path, {"ST1": report_labels("present", side="left")})
+    groups = {g.file: g for g in EngineerSetAdapter(path, Config()).iter_files()}
+
+    assert groups["F1"].report_labels is not None
+    assert groups["F1"].report_labels.pneumothorax_status == "present"
+    assert groups["F1"].report_labels.pneumothorax_side == "left"
+    # report_labels を持たない study は None のまま（既存データセットと同じ）。
+    assert groups["F2"].report_labels is None
+
+
+def test_レポートでpneumothorax_caseが補完される(tmp_path: Path):
+    path = make_report_merged(
+        tmp_path,
+        {"ST1": report_labels("present", side="right"), "ST2": report_labels("absent")},
+    )
+    _, options = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present", "absent"),
+    )
+
+    samples = read_dataset(options.out_path)["samples"]
+    # 気胸マスクが無くても present なら true。
+    assert samples["F1"]["pneumothorax_case"] is True
+    assert samples["F1"]["pneumothorax_side"] == "right"
+    assert samples["F1"]["pneumothorax_mask"]["pixel_array"] is None
+    assert samples["F2"]["pneumothorax_case"] is False
+
+
+def test_report_statusで対象を絞れる(tmp_path: Path):
+    path = make_report_merged(
+        tmp_path,
+        {"ST1": report_labels("present"), "ST2": report_labels("unknown")},
+    )
+    result, options = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present",),
+    )
+
+    assert sorted(read_dataset(options.out_path)["samples"]) == ["F1"]
+    assert result.out_of_scope_counts == {"unknown": 1}
+
+
+def test_label_sourceがannotationsならreport_labelsを無視する(tmp_path: Path):
+    """既存の単一入力経路の挙動が変わらないこと。"""
+    path = make_report_merged(tmp_path, {"ST1": report_labels("present", side="left")})
+    _, options = export(tmp_path, merged_path=path)
+
+    samples = read_dataset(options.out_path)["samples"]
+    assert samples["F1"]["pneumothorax_case"] is False
+    assert samples["F1"]["pneumothorax_side"] is None
+
+
+def test_report_labelsが無いのにannotations_reportなら止まる(tmp_path: Path):
+    from segmentation_validation.lpdata_export import ExportError
+
+    with pytest.raises(ExportError, match="report_labels"):
+        export(tmp_path, label_source="annotations+report")
+
+
+def test_最終JSONにcertainty属性は出ない(tmp_path: Path):
+    """確信度は学習GTではない。テンプレートに無い属性は足さない。"""
+    path = make_report_merged(tmp_path, {"ST1": report_labels("present")})
+    _, options = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present", "absent"),
+    )
+
+    dataset = read_dataset(options.out_path)
+    assert not any("certainty" in key for key in dataset["meta"]["structure"])
+    for sample in dataset["samples"].values():
+        assert not any("certainty" in key for key in sample)
+
+
+def test_分析用CSVにcertaintyが残る(tmp_path: Path):
+    """判定には使わないが、後から層別評価できるよう捨てない。"""
+    import csv
+
+    path = make_report_merged(
+        tmp_path,
+        {
+            "ST1": report_labels("present", certainty="unlikely"),
+            "ST2": report_labels("unknown", certainty=None),
+        },
+    )
+    result, _ = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present",),
+    )
+
+    rows = {
+        r["sample_id"]: r
+        for r in csv.DictReader(
+            result.artifacts["report_labels_csv"].open(encoding="utf-8")
+        )
+    }
+    # 確信度が unlikely でも present なら true（certainty は判定に使わない）。
+    assert rows["F1"]["pneumothorax_certainty_max"] == "unlikely"
+    assert rows["F1"]["pneumothorax_case"] == "True"
+    assert rows["F1"]["in_scope"] == "True"
+    # 範囲外で落とした分も certainty ごと残る。
+    assert rows["F2"]["in_scope"] == "False"
+    assert rows["F2"]["pneumothorax_status"] == "unknown"
+
+
+def test_artifact_prefixで同じディレクトリに2回書き出せる(tmp_path: Path):
+    result_a, _ = export(tmp_path)
+    result_b, _ = export(tmp_path, artifact_prefix="ofc_")
+
+    assert result_a.artifacts["summary"] != result_b.artifacts["summary"]
+    assert result_a.artifacts["summary"].exists()
+    assert result_b.artifacts["summary"].name.startswith("ofc_")
+
+
+# -------------------------------------------------- case_evidence の引き継ぎ
+
+
+def test_明示的陰性のIDがprovenanceに載る(tmp_path: Path):
+    """統合が「確認済みの陰性」を守るための根拠。
+
+    テンプレートに無い属性はサンプルに載せられないので provenance へ出す。
+    """
+    path = merge_sources(
+        tmp_path,
+        {
+            "DS_A": {"inst": {"ST1": {"SE1": {"F1": ["u1"]}}}},
+            "DS_B": {"inst": {"ST2": {"SE2": {"F2": ["u2"]}}}},
+        },
+    )
+    # F1: 正常ラベルのみ → 明示的陰性
+    # F2: 正常ラベル＋結節 → status は present になるが**明示的陰性のまま**
+    #     （実データ167件の形。abnormal_finding_status では拾えない）
+    patch_annotations(
+        path,
+        {
+            "F1": [normal_label()],
+            "F2": [normal_label(), finding("nodule", "001")],
+        },
+    )
+    _, options = export(tmp_path, merged_path=path)
+
+    dataset = read_dataset(options.out_path)
+    evidence = dataset["meta"]["provenance"]["case_evidence"]
+    assert evidence["schema_version"] == 1
+    assert sorted(evidence["explicit_negative_normal"]) == ["F1", "F2"]
+    # F2 は status が present でも明示的陰性として載る。
+    assert dataset["samples"]["F2"]["abnormal_finding_status"] == "present"
+
+
+def test_陽性サンプルはIDに載らない(tmp_path: Path):
+    """``pneumothorax_case: true`` は自明なので列挙しない（統合は true を下げない）。"""
+    _, options = export(tmp_path)
+
+    evidence = read_dataset(options.out_path)["meta"]["provenance"]["case_evidence"]
+    assert evidence["explicit_negative_normal"] == []
+    assert evidence["explicit_negative_report"] == []
+
+
+def test_label_sourceがannotationsでもcase_evidenceを書く(tmp_path: Path):
+    """development 側の出力にも要る（統合の primary になるのはこちら）。"""
+    _, options = export(tmp_path)
+
+    provenance = read_dataset(options.out_path)["meta"]["provenance"]
+    assert provenance["label_source"] == "annotations"
+    assert "case_evidence" in provenance

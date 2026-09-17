@@ -39,7 +39,7 @@ from typing import Any, Iterator
 from ..config import Config
 from ..core.labels import parse_labels
 from ..core.paths import reference_mask_path, resolve_under
-from ..core.records import AnnotationRecord, FileGroup
+from ..core.records import AnnotationRecord, FileGroup, ReportLabels
 from .base import Capability
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,10 @@ _PREFIX = "engineer-set-"
 IMAGE_PATH_ROOT = "medical2"
 ANNOTATION_PATH_ROOT = "annotation"
 IMAGE_PATH_DEPTH = 8
+
+#: 構造化読影レポート由来のラベルを載せる study レベルのキー。
+#: ofuna_chuo_report が名前空間キーとして足すもので、通常の engineer-set には無い。
+REPORT_LABELS_KEY = "report_labels"
 
 
 def dataset_id_for(path: Path) -> str:
@@ -147,6 +151,8 @@ class EngineerSetAdapter:
         for institution, studies in self._dataset.items():
             for study_key, study in studies.items():
                 study_labels = _case_labels(study)
+                # study 単位で1回だけ読み、配下の全ファイルで共有する。
+                report_labels = _report_labels(study, study_key)
                 for series_key, series in study.get("series_list", {}).items():
                     case_labels = study_labels + _case_labels(series)
                     shape = _shape_of(series)
@@ -193,6 +199,7 @@ class EngineerSetAdapter:
                             case_labels=case_labels,
                             series_image_index=series_order[file_key],
                             series_image_count=series_image_count,
+                            report_labels=report_labels,
                         )
 
     def iter_annotations(self) -> Iterator[AnnotationRecord]:
@@ -281,6 +288,53 @@ def open_adapters(config: Config) -> list[EngineerSetAdapter]:
 
 
 # ------------------------------------------------------------------ helpers
+
+
+def _counts(raw: Any) -> tuple[tuple[str, int], ...]:
+    """``{"definite": 2}`` を hashable なタプルにする（キー順で安定化）。"""
+    if not isinstance(raw, dict):
+        return ()
+    return tuple(sorted((str(k), int(v)) for k, v in raw.items()))
+
+
+def _report_labels(study: dict[str, Any], study_key: str) -> ReportLabels | None:
+    """study の ``report_labels`` ブロックを読む。
+
+    **持ってこないもの**: ``finding_labels_observed`` の中身（語彙が統制されて
+    いない）。陽性所見が0件かどうかだけを ``observed_finding_count`` に残す。
+    「レポートは在るが陽性所見が1件も無い」は明示的な陰性根拠になるが、
+    所見名そのものは判定にも出力にも使わないため。
+    """
+    raw = study.get(REPORT_LABELS_KEY)
+    if not isinstance(raw, dict):
+        return None
+    observed = raw.get("finding_labels_observed")
+    return ReportLabels(
+        pneumothorax_status=str(raw.get("pneumothorax_status") or "unknown"),
+        pneumothorax_side=raw.get("pneumothorax_side"),
+        bulla_bleb_status=str(raw.get("bulla_bleb_status") or "unknown"),
+        observed_finding_count=len(observed) if isinstance(observed, list) else 0,
+        pneumothorax_subtype=raw.get("pneumothorax_subtype"),
+        pneumothorax_evidence=raw.get("pneumothorax_evidence"),
+        pneumothorax_certainty_max=raw.get("pneumothorax_certainty_max"),
+        pneumothorax_certainty_counts=_counts(raw.get("pneumothorax_certainty_counts")),
+        pneumothorax_absent_certainty_counts=_counts(
+            raw.get("pneumothorax_absent_certainty_counts")
+        ),
+        bulla_bleb_evidence=raw.get("bulla_bleb_evidence"),
+        bulla_bleb_certainty_max=raw.get("bulla_bleb_certainty_max"),
+        bulla_bleb_certainty_counts=_counts(raw.get("bulla_bleb_certainty_counts")),
+        abnormal_finding_status=str(raw.get("abnormal_finding_status") or "unknown"),
+        needs_review=bool(raw.get("needs_review")),
+        flags=tuple(str(f) for f in (raw.get("flags") or ())),
+        study_name=str(raw.get("study_name") or study_key),
+        schema_version=_optional_int(raw.get("schema_version")),
+        rules_version=raw.get("rules_version"),
+        label_source=raw.get("label_source"),
+        source_dataset_id=raw.get("source_dataset_id"),
+        source_json=raw.get("source_json"),
+        report_sha256=raw.get("report_sha256"),
+    )
 
 
 def _case_labels(container: dict[str, Any]) -> tuple:

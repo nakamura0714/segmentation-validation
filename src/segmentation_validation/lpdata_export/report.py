@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import os
 from collections import Counter
 from pathlib import Path
@@ -40,8 +42,9 @@ def build_summary(
         "",
         "| 設定 | 値 |",
         "| --- | --- |",
-        f"| 入力（統合JSON） | `{options.merged_path}` |",
+        f"| 入力（engineer-set JSON） | `{options.merged_path}` |",
         f"| テンプレート | `{options.template_path}` |",
+        f"| `label_source` | {options.label_source} |",
         f"| `image_mode` | {options.image_mode} → `{options.image_output_dir}` |",
         f"| `mask_mode` | {options.mask_mode} → `{options.mask_output_dir}` |",
         f"| `path_style` | {options.path_style} |",
@@ -59,6 +62,7 @@ def build_summary(
         ]
 
     lines += _label_section(result)
+    lines += _report_label_section(result)
     lines += _null_section(result)
     lines += _vocabulary_section(result)
     lines += _asset_section(result)
@@ -84,6 +88,136 @@ def _label_section(result: ExportResult) -> list[str]:
         "",
     ]
     return lines
+
+
+def _report_label_section(result: ExportResult) -> list[str]:
+    """読影レポート由来の節。``--label-source annotations+report`` のときだけ出す。"""
+    if not (
+        result.report_changes or result.out_of_scope_counts or result.certainty_counts
+    ):
+        return []
+
+    lines = ["## 読影レポート由来のラベル", ""]
+
+    if result.out_of_scope_counts:
+        total = sum(result.out_of_scope_counts.values())
+        lines += [
+            f"取り込み範囲外として落とした画像: **{total:,}**",
+            "",
+            "`unknown` は「気胸でない」ではなく「**主張していない**」の意味なので、",
+            "入れると未検証の陰性を教師信号にしてしまう。範囲を広げるときは",
+            "`config.lpdata_export.report_label_statuses` か",
+            "`--report-status` で指定する。",
+            "",
+            "| pneumothorax_status | 画像数 |",
+            "| --- | ---: |",
+        ]
+        for key in sorted(result.out_of_scope_counts):
+            lines.append(f"| {key} | {result.out_of_scope_counts[key]:,} |")
+        lines.append("")
+
+    if result.case_evidence_counts:
+        lines += [
+            "### `pneumothorax_case` の根拠",
+            "",
+            "`false` には「陰性だと分かっている」と「確認できていない」がある。",
+            "レポートで補完したのは **`unconfirmed` だったものだけ**。",
+            "",
+            "| case_evidence | 画像数 |",
+            "| --- | ---: |",
+        ]
+        for key in sorted(result.case_evidence_counts):
+            lines.append(f"| `{key}` | {result.case_evidence_counts[key]:,} |")
+        lines.append("")
+
+    if result.report_changes:
+        lines += [
+            "### レポートで変わった値",
+            "",
+            "| 変更 | 画像数 |",
+            "| --- | ---: |",
+        ]
+        for key in sorted(result.report_changes):
+            lines.append(f"| `{key}` | {result.report_changes[key]:,} |")
+        lines += [
+            "",
+            "> `abnormal_finding_status` はレポートで**書き換えていない**。",
+            "> 上流は policy 未確定として常に `unknown` を返すので、写すと",
+            "> annotation 由来の判定を潰すことになる。",
+            "",
+        ]
+
+    if result.certainty_counts:
+        lines += [
+            "### 確信度（`pneumothorax_certainty_max`）",
+            "",
+            "**判定には一切使っていない。** `pneumothorax_status` が `present` なら",
+            "`unlikely` でも `pneumothorax_case: true` にしている。",
+            "層別評価・分析のための記録で、1行1サンプルは分析用CSVが正本。",
+            "",
+            "| certainty_max | 画像数 |",
+            "| --- | ---: |",
+        ]
+        for key, count in sorted(
+            result.certainty_counts.items(), key=lambda kv: (-kv[1], kv[0])
+        ):
+            lines.append(f"| `{key}` | {count:,} |")
+        lines.append("")
+
+    conflicts = result.followups.get("report_label_conflicts", [])
+    if conflicts:
+        lines += [
+            f"### annotation を優先した食い違い（{len(conflicts)} 件）",
+            "",
+            "**明示的な陰性/陽性GT がレポートより優先される。** 自動では直さないので、",
+            "必要なら個別に確認する。",
+            "",
+        ]
+        for line in conflicts[:MAX_ROWS]:
+            lines.append(f"- {line}")
+        if len(conflicts) > MAX_ROWS:
+            lines.append(f"- …ほか {len(conflicts) - MAX_ROWS} 件")
+        lines.append("")
+
+    review = result.followups.get("report_needs_review", [])
+    if review:
+        lines += [
+            f"### 上流が `needs_review` を立てたもの（{len(review)} 件）",
+            "",
+            "レポート内の矛盾・消失表現・本文のみの言及など。"
+            "詳細は `ofuna_chuo_report` の `csv/review_queue.csv`。",
+            "",
+        ]
+    return lines
+
+
+def write_report_labels_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
+    """読影レポート由来ラベルの分析用CSV。
+
+    **certainty をここに残す。** 学習GTではないので出力JSONの属性にはしないが、
+    後から certainty 別に抽出・性能評価できるよう捨てない。
+    dict / list の値は JSON 文字列にして1セルに収める。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(rows[0]) if rows else []
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    key: (
+                        json.dumps(value, ensure_ascii=False)
+                        if isinstance(value, (dict, list))
+                        else value
+                    )
+                    for key, value in row.items()
+                }
+            )
+    os.replace(tmp, path)
+    return path
 
 
 def _null_section(result: ExportResult) -> list[str]:

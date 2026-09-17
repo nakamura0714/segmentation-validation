@@ -19,20 +19,34 @@ from __future__ import annotations
 
 from .export import ExportError, export_lpdata
 from .invariants import InvariantViolation, check_sample, check_samples
-from .labels import SampleLabels, build_labels
-from .options import ExportOptions, ExportResult
+from .labels import CaseEvidence, SampleLabels, build_labels
+from .merge import MergeError, MergeOptions, MergeReport, merge_lpdata
+from .options import (
+    LABEL_SOURCE_ANNOTATIONS,
+    LABEL_SOURCE_REPORT,
+    ExportOptions,
+    ExportResult,
+)
 from .reader import read_dataset, sample_ids
 from .report import build_summary
+from .report_labels import ReportLabelError, enrich_labels, in_scope
 from .sample import FIELD_BUILDERS
 from .template import Template, TemplateDriftError, load_template, validate_coverage
 from .writer import build_dataset, write_dataset
 
 __all__ = [
     "FIELD_BUILDERS",
+    "LABEL_SOURCE_ANNOTATIONS",
+    "LABEL_SOURCE_REPORT",
+    "CaseEvidence",
     "ExportError",
     "ExportOptions",
     "ExportResult",
     "InvariantViolation",
+    "MergeError",
+    "MergeOptions",
+    "MergeReport",
+    "ReportLabelError",
     "SampleLabels",
     "Template",
     "TemplateDriftError",
@@ -41,8 +55,11 @@ __all__ = [
     "build_summary",
     "check_sample",
     "check_samples",
+    "enrich_labels",
     "export_lpdata",
+    "in_scope",
     "load_template",
+    "merge_lpdata",
     "read_dataset",
     "sample_ids",
     "validate_coverage",

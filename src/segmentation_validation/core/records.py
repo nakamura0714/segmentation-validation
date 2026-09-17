@@ -164,6 +164,66 @@ class AnnotationRecord:
 
 
 @dataclass(frozen=True)
+class ReportLabels:
+    """構造化読影レポート由来の study レベルラベル（``study.report_labels``）。
+
+    元の25キーのうち、**判定に使うもの**と**分析用に保持するもの**だけを写す。
+    生の dict を持たないのは、``FileGroup`` を hashable に保つためと、
+    ``finding_labels_observed``（語彙が統制されておらず、37,458通り・生の日本語
+    自由文を含む）に下流から手が届かないようにするため。
+
+    ⚠️ **``*_certainty_*`` を判定条件に使わないこと。**
+    ``definite`` / ``probable`` / ``possible`` / ``unlikely`` は層別評価・分析の
+    ためのメタ情報であって学習GTではない。``pneumothorax_case`` は
+    ``pneumothorax_status`` だけで決まる（上流 ``ofuna_chuo_report`` の
+    ``labels/rules.py`` も「規則と certainty は分離されている」と明記している）。
+    ここに保持するのは、後から certainty 別に抽出・性能評価できるようにするため。
+
+    ``abnormal_finding_status`` は上流が policy 未確定として常に ``unknown`` を
+    返す。値は写すが**採用側は使わない**。
+    """
+
+    # --- 判定に使う ---
+    pneumothorax_status: str = "unknown"
+    pneumothorax_side: str | None = None
+    bulla_bleb_status: str = "unknown"
+    #: 観測された陽性所見の数。「レポートは在るが陽性所見が1つも無い」＝
+    #: 明示的な陰性根拠かどうかの判定にだけ使う（所見名そのものは持たない）。
+    observed_finding_count: int = 0
+
+    # --- 分析用に保持する（判定には使わない） ---
+    pneumothorax_subtype: str | None = None
+    pneumothorax_evidence: str | None = None
+    pneumothorax_certainty_max: str | None = None
+    pneumothorax_certainty_counts: tuple[tuple[str, int], ...] = ()
+    pneumothorax_absent_certainty_counts: tuple[tuple[str, int], ...] = ()
+    bulla_bleb_evidence: str | None = None
+    bulla_bleb_certainty_max: str | None = None
+    bulla_bleb_certainty_counts: tuple[tuple[str, int], ...] = ()
+    abnormal_finding_status: str = "unknown"
+    needs_review: bool = False
+    flags: tuple[str, ...] = ()
+
+    # --- 出所 ---
+    study_name: str | None = None
+    schema_version: int | None = None
+    rules_version: str | None = None
+    label_source: str | None = None
+    source_dataset_id: str | None = None
+    source_json: str | None = None
+    report_sha256: str | None = None
+
+    @property
+    def has_report(self) -> bool:
+        """レポート本体が存在するか。
+
+        上流は「レポートが無い」を ``pneumothorax_evidence == "no_report"`` で
+        表す。**レポート未取得を陰性の根拠にしない**ための判定に使う。
+        """
+        return self.pneumothorax_evidence not in (None, "no_report")
+
+
+@dataclass(frozen=True)
 class FileGroup:
     """1画像ぶんのアノテーション一式。
 
@@ -197,6 +257,11 @@ class FileGroup:
     # 他ビューはアノテーション済み）が「series内の何枚目か」を区別するために使う。
     series_image_index: int = 0
     series_image_count: int = 1
+    # 構造化読影レポート由来の study レベルラベル。持たないデータセットでは None。
+    # study レベルの値を配下の全ファイルに複製する（上流 ofuna_chuo_report の
+    # emit.py が既に同じ複製をしており、multi_file_study / view_discordant の
+    # フラグで追跡できるようにしてある）。
+    report_labels: ReportLabels | None = None
 
     @property
     def file_uid(self) -> str:

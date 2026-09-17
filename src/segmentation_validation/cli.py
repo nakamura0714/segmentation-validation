@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -168,8 +168,10 @@ def build_parser() -> argparse.ArgumentParser:
         "既定は meta_development.conflicts に両方の値を記録して続行",
     )
 
+    lpdata_common = _lpdata_common_parser()
     lpdata = sub.add_parser(
         "export-lpdata",
+        parents=[lpdata_common],
         help="統合JSONを lp-data 標準形式のデータセットJSONへ書き出す",
     )
     lpdata.add_argument(
@@ -178,72 +180,64 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="入力の統合JSON（既定は development_dir の最新 development_merged.json）",
     )
-    lpdata.add_argument(
+
+    ofc = sub.add_parser(
+        "export-lpdata-ofc",
+        parents=[lpdata_common],
+        help="構造化読影レポート付き engineer-set JSON を lp-data 形式へ書き出す",
+    )
+    ofc.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        help="入力の engineer-set JSON（study に report_labels を持つもの）",
+    )
+    ofc.add_argument(
+        "--report-status",
+        action="append",
+        default=None,
+        metavar="STATUS",
+        help="取り込む report_labels.pneumothorax_status（繰り返し可）。"
+        "既定は config の lpdata_export.report_label_statuses。"
+        "unknown は「気胸でない」ではなく「主張していない」の意味なので既定に入れない",
+    )
+
+    merge = sub.add_parser(
+        "merge-lpdata",
+        help="2つの lp-data データセットJSONを1つに統合する",
+    )
+    merge.add_argument(
+        "--primary",
+        type=Path,
+        required=True,
+        help="重複時に残す側（通常は development 由来）",
+    )
+    merge.add_argument(
+        "--secondary",
+        type=Path,
+        required=True,
+        help="ラベルの補強に使う側（通常は読影レポート由来）",
+    )
+    merge.add_argument("--out", type=Path, required=True, help="統合後のJSON")
+    merge.add_argument(
         "--template",
         type=Path,
         default=None,
-        help="属性の型と意味の正典となるテンプレートYAML"
-        "（既定は config の lpdata_export.template_path）",
+        help="属性の型と意味の正典となるテンプレートYAML（指定すると突合する）",
     )
-    lpdata.add_argument(
-        "--out", type=Path, default=None, help="出力するデータセットJSON"
-    )
-    lpdata.add_argument(
-        "--image-output-dir", type=Path, default=None, help="DICOM変換PNGの出力先"
-    )
-    lpdata.add_argument(
-        "--mask-output-dir", type=Path, default=None, help="結合気胸マスクの出力先"
-    )
-    lpdata.add_argument(
-        "--path-style",
-        choices=("relative", "absolute"),
-        default="relative",
-        help="JSONに書くパスの表記。relative は出力JSONの親を基準にする"
-        "（基準の外にあるものは絶対のまま）",
-    )
-    lpdata.add_argument(
-        "--image-mode",
-        choices=("convert", "planned", "none"),
-        default="convert",
-        help="convert=DICOMを16bit PNGへ変換して実ファイルを参照 / "
-        "planned=変換せず予定パスだけ記録 / none=image_file を null にする",
-    )
-    lpdata.add_argument(
-        "--mask-mode",
-        choices=("generate", "planned", "none"),
-        default="planned",
-        help="generate=結合マスクPNGを書き出す / planned=予定パスだけ記録（既定） / "
-        "none=pixel_array を null にする",
-    )
-    lpdata.add_argument(
-        "--on-missing-dicom",
-        choices=("skip", "error"),
-        default="skip",
-        help="DICOMが無いとき。skip は image_file を null にして続行、error は停止。"
-        "どちらでも空画像は作らない",
-    )
-    lpdata.add_argument(
-        "--no-measure",
+    merge.add_argument(
+        "--dry-run",
         action="store_true",
-        help="画素を読まず導出値を全てnullにする（下見用。学習には使えない）",
+        help="データセットJSONを書かず、件数と裁定結果だけ出す",
     )
-    lpdata.add_argument("--jobs", type=int, default=8, help="並列数")
-    lpdata.add_argument("--limit", type=int, default=None, help="先頭N件だけ処理する")
-    lpdata.add_argument(
-        "--only-dataset",
-        action="append",
-        default=[],
-        metavar="DATASET_ID",
-        help="対象データセットを絞る（繰り返し可）",
-    )
-    lpdata.add_argument(
-        "--force",
+    merge.add_argument(
+        "--no-enrich",
         action="store_true",
-        help="計測キャッシュを捨て、既存のPNGも作り直す",
+        help="重複時にラベル補強をせず primary をそのまま残す",
     )
-    lpdata.add_argument("--dataset-name", default=None, help="meta.dataset_name")
-    lpdata.add_argument("--dataset-id", default=None, help="meta.dataset_id")
-    lpdata.add_argument("--owner", default=None, help="meta.owner")
+    merge.add_argument("--dataset-name", default=None, help="meta.dataset_name")
+    merge.add_argument("--dataset-id", default=None, help="meta.dataset_id")
+    merge.add_argument("--owner", default=None, help="meta.owner")
 
     review = sub.add_parser("review", help="FiftyOne での目視レビュー")
     rsub = review.add_subparsers(dest="review_command", required=True)
@@ -317,21 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("設定を読めない: %s", error)
         return EXIT_FAILURE
 
-    handlers = {
-        "show-config": _show_config,
-        "list-sources": _list_sources,
-        "list-checks": _list_checks,
-        "scan": _scan,
-        "check": _check,
-        "select": _select,
-        "report": _report,
-        "gui": _gui,
-        "serve": _serve,
-        "build-dataset": _build_dataset,
-        "export-lpdata": _export_lpdata,
-        "review": _review,
-    }
-    handler = handlers.get(args.command)
+    handler = HANDLERS.get(args.command)
     if handler is None:
         parser.error(f"未知のサブコマンド: {args.command}")
         return EXIT_FAILURE
@@ -1084,6 +1064,99 @@ def _write_duplicate_report(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow(row)
 
 
+def _lpdata_common_parser() -> argparse.ArgumentParser:
+    """``export-lpdata`` と ``export-lpdata-ofc`` が共有するオプション。
+
+    ``parents=`` で共有するのは、20個超のフラグを2か所で二重管理すると
+    必ず片方だけが更新されて drift するため（``--path-style`` や
+    ``--on-missing-dicom`` は両方で同じ意味でなければならない）。
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--template",
+        type=Path,
+        default=None,
+        help="属性の型と意味の正典となるテンプレートYAML"
+        "（既定は config の lpdata_export.template_path）",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, help="出力するデータセットJSON"
+    )
+    parser.add_argument(
+        "--image-output-dir", type=Path, default=None, help="DICOM変換PNGの出力先"
+    )
+    parser.add_argument(
+        "--mask-output-dir",
+        type=Path,
+        default=None,
+        help="結合気胸マスクの出力先。**入力ごとに別のディレクトリにすること**"
+        "（ファイル名が <sample_id>.png なので、共有すると既存のGTマスクを"
+        "上書きする）",
+    )
+    parser.add_argument(
+        "--artifact-prefix",
+        default="",
+        help="summary / manifest / 計測キャッシュのファイル名に付ける接頭辞。"
+        "同じディレクトリへ2回書き出すときに潰し合わないために使う（例 ofc_）",
+    )
+    parser.add_argument(
+        "--path-style",
+        choices=("relative", "absolute"),
+        default="relative",
+        help="JSONに書くパスの表記。relative は出力JSONの親を基準にする"
+        "（基準の外にあるものは絶対のまま）",
+    )
+    parser.add_argument(
+        "--image-mode",
+        choices=("convert", "planned", "none"),
+        default="convert",
+        help="convert=DICOMを16bit PNGへ変換して実ファイルを参照 / "
+        "planned=変換せず予定パスだけ記録 / none=image_file を null にする",
+    )
+    parser.add_argument(
+        "--mask-mode",
+        choices=("generate", "planned", "none"),
+        default="planned",
+        help="generate=結合マスクPNGを書き出す / planned=予定パスだけ記録（既定） / "
+        "none=pixel_array を null にする",
+    )
+    parser.add_argument(
+        "--on-missing-dicom",
+        choices=("skip", "error"),
+        default="skip",
+        help="DICOMが無いとき。skip は image_file を null にして続行、error は停止。"
+        "どちらでも空画像は作らない",
+    )
+    parser.add_argument(
+        "--no-measure",
+        action="store_true",
+        help="画素を読まず導出値を全てnullにする（下見用。学習には使えない）",
+    )
+    parser.add_argument("--jobs", type=int, default=8, help="並列数")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="先頭N件だけ処理する（--report-status で絞った**後**の先頭N件）",
+    )
+    parser.add_argument(
+        "--only-dataset",
+        action="append",
+        default=[],
+        metavar="DATASET_ID",
+        help="対象データセットを絞る（繰り返し可）",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="計測キャッシュを捨て、既存のPNGも作り直す",
+    )
+    parser.add_argument("--dataset-name", default=None, help="meta.dataset_name")
+    parser.add_argument("--dataset-id", default=None, help="meta.dataset_id")
+    parser.add_argument("--owner", default=None, help="meta.owner")
+    return parser
+
+
 def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
     """統合JSONを lp-data 標準形式へ書き出す。
 
@@ -1091,10 +1164,6 @@ def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
     正本は ``lpdata_export`` パッケージ側に置いてある）。ここは引数を
     ``ExportOptions`` に組み替えるだけ。
     """
-    from .lpdata_export import ExportError, ExportOptions, export_lpdata
-    from .lpdata_export.images import MissingDicomError
-    from .lpdata_export.template import TemplateDriftError
-
     merged = args.merged or _latest_merged(config)
     if merged is None:
         logger.error(
@@ -1104,11 +1173,67 @@ def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     # 既定の置き場は統合JSONのバージョンタグごと。3つとも個別に上書きできる。
-    settings = config.lpdata_export
     out_dir = config.lpdata_dir / merged.parent.name
-    out = args.out or out_dir / "chest_metry_pi6_pneumothorax.json"
+    return _run_export_lpdata(config, args, source=merged, default_out_dir=out_dir)
+
+
+def _export_lpdata_ofc(config: Config, args: argparse.Namespace) -> int:
+    """構造化読影レポート付き engineer-set JSON を lp-data 形式へ書き出す。
+
+    ``export-lpdata`` と同じエンジンを通し、違いは2つだけ。
+
+    - ``report_labels`` でラベルを補強する（``label_source``）
+    - 取り込む ``pneumothorax_status`` を絞る（``--report-status``）
+    """
+    from .lpdata_export.options import LABEL_SOURCE_REPORT
+
+    source: Path = args.source
+    if not source.is_file():
+        logger.error("入力の engineer-set JSON が無い: %s", source)
+        return EXIT_FAILURE
+
+    settings = config.lpdata_export
+    statuses = tuple(
+        args.report_status
+        if args.report_status is not None
+        else settings.report_label_statuses
+    )
+    # 既定の置き場は入力ファイル名のタグではなく実行日。development 側の
+    # 出力と同じディレクトリに混ざらないよう --out の明示を促す。
+    return _run_export_lpdata(
+        config,
+        args,
+        source=source,
+        default_out_dir=config.lpdata_dir / date.today().strftime("%Y%m%d"),
+        label_source=LABEL_SOURCE_REPORT,
+        report_statuses=statuses,
+        default_out_name="ofc_report.lpdata.json",
+    )
+
+
+def _run_export_lpdata(
+    config: Config,
+    args: argparse.Namespace,
+    *,
+    source: Path,
+    default_out_dir: Path,
+    label_source: str = "annotations",
+    report_statuses: tuple[str, ...] = (),
+    default_out_name: str = "chest_metry_pi6_pneumothorax.json",
+) -> int:
+    """``ExportOptions`` を組み立てて ``export_lpdata`` を呼ぶだけ。
+
+    判断も処理もここには置かない（Notebook が同じことを再実装しないで済むように、
+    正本は ``lpdata_export`` パッケージ側に置いてある）。
+    """
+    from .lpdata_export import ExportError, ExportOptions, export_lpdata
+    from .lpdata_export.images import MissingDicomError
+    from .lpdata_export.template import TemplateDriftError
+
+    settings = config.lpdata_export
+    out = args.out or default_out_dir / default_out_name
     options = ExportOptions(
-        merged_path=merged,
+        merged_path=source,
         template_path=args.template or config.resolve(settings.template_path),
         out_path=out,
         image_output_dir=args.image_output_dir or out.parent / settings.image_dirname,
@@ -1121,10 +1246,13 @@ def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
         on_missing_dicom=args.on_missing_dicom,
         path_style=args.path_style,
         measure=not args.no_measure,
+        label_source=label_source,
+        report_statuses=report_statuses,
         jobs=args.jobs,
         limit=args.limit,
         only_datasets=tuple(args.only_dataset),
         force=args.force,
+        artifact_prefix=args.artifact_prefix,
     )
 
     try:
@@ -1148,6 +1276,56 @@ def _export_lpdata(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _merge_lpdata(config: Config, args: argparse.Namespace) -> int:
+    """2つの lp-data データセットJSONを統合する。
+
+    ``--dry-run`` なら統合JSONを書かず、件数と裁定結果だけを出す
+    （**統合前に人が確認するための経路**）。
+    """
+    from .lpdata_export.merge import MergeError, MergeOptions, merge_lpdata
+    from .lpdata_export.template import TemplateDriftError
+
+    options = MergeOptions(
+        primary_path=args.primary,
+        secondary_path=args.secondary,
+        out_path=args.out,
+        template_path=args.template,
+        dataset_name=args.dataset_name,
+        dataset_id=args.dataset_id,
+        owner=args.owner,
+        dry_run=args.dry_run,
+        no_enrich=args.no_enrich,
+    )
+    try:
+        report = merge_lpdata(options)
+    except (MergeError, TemplateDriftError, ValueError) as error:
+        logger.error("%s", error)
+        return EXIT_FAILURE
+
+    logger.info(
+        "重複 %d / 補強 %d / 追加 %d → 統合後 %d サンプル（詳細は %s）",
+        report.duplicates,
+        report.enriched,
+        report.added_from_secondary,
+        report.merged_samples,
+        report.artifacts.get("summary"),
+    )
+    if report.mask_conflicts:
+        logger.warning(
+            "気胸マスクの食い違いが %d 件ある（primary を採用した。%s を見ること）",
+            len(report.mask_conflicts),
+            report.artifacts.get("summary"),
+        )
+    if report.violations or report.identity_conflicts:
+        logger.error(
+            "不変条件の違反 %d 件 / 同一性の食い違い %d 件",
+            len(report.violations),
+            len(report.identity_conflicts),
+        )
+        return EXIT_ISSUES
+    return EXIT_OK
+
+
 def _latest_merged(config: Config) -> Path | None:
     """``development_merged.json`` を新しいバージョンタグから探す。
 
@@ -1162,6 +1340,12 @@ def _latest_merged(config: Config) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+#: サブコマンド名 → ハンドラ。``build_parser`` の add_parser と対にする
+#: （片方だけ足すと実行時に「未知のサブコマンド」で落ちるので、
+#: ``tests/test_cli.py`` が両者の一致を検査する）。
+HANDLERS: dict[str, Any] = {}
 
 
 def _review(config: Config, args: argparse.Namespace) -> int:
@@ -2143,6 +2327,26 @@ def _read_review_decisions(
 
 def _split(value: str | None) -> list[str] | None:
     return [token for token in value.split(",") if token.strip()] if value else None
+
+
+HANDLERS.update(
+    {
+        "show-config": _show_config,
+        "list-sources": _list_sources,
+        "list-checks": _list_checks,
+        "scan": _scan,
+        "check": _check,
+        "select": _select,
+        "report": _report,
+        "gui": _gui,
+        "serve": _serve,
+        "build-dataset": _build_dataset,
+        "export-lpdata": _export_lpdata,
+        "export-lpdata-ofc": _export_lpdata_ofc,
+        "merge-lpdata": _merge_lpdata,
+        "review": _review,
+    }
+)
 
 
 if __name__ == "__main__":
