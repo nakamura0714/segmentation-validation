@@ -158,6 +158,8 @@ def make_report_labels(
     side: str | None = None,
     bulla: str = "unknown",
     effusion: str = "unknown",
+    effusion_evidence: str | None = None,
+    effusion_findings: tuple[str, ...] = (),
     observed_finding_count: int = 0,
     certainty_max: str | None = "definite",
     certainty_counts: tuple[tuple[str, int], ...] = (("definite", 1),),
@@ -165,7 +167,7 @@ def make_report_labels(
     abnormal: str = "unknown",
     needs_review: bool = False,
     flags: tuple[str, ...] = ("policy_pending",),
-    schema_version: int | None = 1,
+    schema_version: int | None = 2,
 ) -> ReportLabels:
     """構造化読影レポート由来の study レベルラベル。
 
@@ -177,6 +179,8 @@ def make_report_labels(
         pneumothorax_side=side,
         bulla_bleb_status=bulla,
         pleural_effusion_status=effusion,
+        pleural_effusion_evidence=effusion_evidence,
+        pleural_effusion_findings=effusion_findings,
         observed_finding_count=observed_finding_count,
         pneumothorax_evidence=evidence,
         pneumothorax_certainty_max=certainty_max,

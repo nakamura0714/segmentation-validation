@@ -553,9 +553,11 @@ def report_labels(
     side: str | None = None,
     certainty: str | None = "definite",
     observed: list[str] | None = None,
+    effusion: str = "unknown",
+    effusion_evidence: str | None = None,
 ) -> dict:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "rules_version": "r1",
         "label_source": "structured_report",
         "source_dataset_id": "OFC_SRC",
@@ -566,6 +568,8 @@ def report_labels(
         "pneumothorax_certainty_max": certainty,
         "pneumothorax_certainty_counts": {certainty: 1} if certainty else {},
         "bulla_bleb_status": "unknown",
+        "pleural_effusion_status": effusion,
+        "pleural_effusion_evidence": effusion_evidence,
         "abnormal_finding_status": "unknown",
         "finding_labels_observed": observed or [],
         "flags": ["policy_pending"],
@@ -600,9 +604,10 @@ def test_report_labelsがFileGroupまで運ばれる(tmp_path: Path):
     assert groups["F2"].report_labels is None
 
 
-def test_胸水はfinding_labels_observedの1語から立てる(tmp_path: Path):
-    """上流に ``pleural_effusion_status`` が無いので観測リストの1語だけを畳む。
+def test_胸水は上流の専用キーから読む(tmp_path: Path):
+    """schema 2 の ``pleural_effusion_status`` をそのまま採る。
 
+    観測リストからは**元の所見名だけ**を拾う（血胸を胸水に畳む前の名前）。
     リスト全体は下流へ渡さない（語彙が統制されていない）。
     """
     from segmentation_validation.adapters.engineer_set import EngineerSetAdapter
@@ -610,23 +615,34 @@ def test_胸水はfinding_labels_observedの1語から立てる(tmp_path: Path):
     path = make_report_merged(
         tmp_path,
         {
-            "ST1": report_labels("present", observed=["pleural_effusion", "scar"]),
-            "ST2": report_labels("present", observed=["scar"]),
+            "ST1": report_labels(
+                "present",
+                effusion="present",
+                effusion_evidence="structured_positive",
+                observed=["hemothorax", "scar"],
+            ),
+            "ST2": report_labels("present", effusion="unknown", observed=["scar"]),
         },
     )
     groups = {g.file: g for g in EngineerSetAdapter(path, Config()).iter_files()}
 
-    assert groups["F1"].report_labels.pleural_effusion_status == "present"
-    # 載っていないのは「記載なし」と「明示的に陰性」の両方を含むので absent にしない。
+    first = groups["F1"].report_labels
+    assert first.pleural_effusion_status == "present"
+    assert first.pleural_effusion_evidence == "structured_positive"
+    # 血胸として書かれたことが残る（統制した2語だけを照合している）。
+    assert first.pleural_effusion_findings == ("hemothorax",)
     assert groups["F2"].report_labels.pleural_effusion_status == "unknown"
+    assert groups["F2"].report_labels.pleural_effusion_findings == ()
 
 
 def test_胸水フラグが出力JSONに載る(tmp_path: Path):
     path = make_report_merged(
         tmp_path,
         {
-            "ST1": report_labels("present", observed=["pleural_effusion"]),
-            "ST2": report_labels("present", observed=[]),
+            "ST1": report_labels("present", effusion="present"),
+            "ST2": report_labels(
+                "present", effusion="absent", effusion_evidence="structured_negative"
+            ),
         },
     )
     _, options = export(
@@ -638,7 +654,8 @@ def test_胸水フラグが出力JSONに載る(tmp_path: Path):
 
     samples = read_dataset(options.out_path)["samples"]
     assert samples["F1"]["pleural_effusion_status"] == "present"
-    assert samples["F2"]["pleural_effusion_status"] == "unknown"
+    # レポートの明示陰性は absent として採る（記載なしは unknown のまま来る）。
+    assert samples["F2"]["pleural_effusion_status"] == "absent"
     # 気胸とは独立した属性。片方が立っても他方は動かない。
     assert samples["F1"]["pneumothorax_case"] is True
 

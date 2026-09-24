@@ -883,12 +883,17 @@ def _distribution_section(report: MergeReport) -> list[str]:
             lines.append(f"| {key} | {report.effusion_counts_after[key]:,} |")
         lines += [
             "",
-            "> `absent` の根拠は annotation の明示正常（`No Findings/normal`）"
-            "**だけ**。secondary（読影レポート由来）は `present` しか上げない ——"
-            "観測リストに載らない理由が「記載なし」と「明示的に陰性」の両方を含み、"
-            "区別できないため。primary が `absent` のサンプルに secondary が"
-            "`present` を主張した場合は、`absent` を維持して裁定一覧"
-            "（`explicit_negative_wins`）に出している。",
+            "> `absent` の根拠は2つある。**annotation の明示正常**"
+            "（`No Findings/normal` かつ所見 annotation 0件）と、"
+            "**レポートの明示陰性**（`structured_negative`）。"
+            "記載が無いだけ（`no_mention`）は上流・下流とも `unknown` のままで、"
+            "**所見が無いことを陰性に読み替える経路はどこにも無い**。"
+            "前者は必ず `abnormal_finding_status: absent` と一致するが、後者は"
+            "所見の有無と独立なので、`pneumothorax_case: true` かつ胸水 `absent`"
+            "（気胸に胸水を伴わない）は正当な組み合わせ。"
+            "値が食い違ったときは primary を維持して裁定一覧に出す"
+            "（`absent` を維持＝`explicit_negative_wins` / "
+            "`present` を維持＝`never_downgrade`）。",
             "",
         ]
     return lines

@@ -333,6 +333,37 @@ def test_胸水はレポートが黙っていれば動かない():
     assert result.labels.pleural_effusion_status == UNKNOWN
 
 
+def test_レポートの明示陰性はabsentとして採る():
+    """上流 schema 2 の ``structured_negative``（明示的に「胸水なし」）だけ。
+
+    記載が無いだけの ``no_mention`` は上流が ``unknown`` で返すので、ここには来ない
+    （＝所見が無いことを陰性に読み替える経路はどこにも無い）。
+    """
+    result = enrich_labels(
+        base_labels(),
+        make_report_labels(
+            status=PRESENT, effusion=ABSENT, effusion_evidence="structured_negative"
+        ),
+    )
+
+    assert result.labels.pleural_effusion_status == ABSENT
+    assert "pleural_effusion_status" in [c.field for c in result.changes]
+
+
+def test_血胸も胸水presentとして扱い元の所見名を残す():
+    """上流が血胸を胸水に畳む。畳む前の名前は ``pleural_effusion_findings`` に残る。"""
+    report = make_report_labels(
+        status=PRESENT,
+        effusion=PRESENT,
+        effusion_evidence="structured_positive",
+        effusion_findings=("hemothorax",),
+    )
+    result = enrich_labels(base_labels(), report)
+
+    assert result.labels.pleural_effusion_status == PRESENT
+    assert report.pleural_effusion_findings == ("hemothorax",)
+
+
 # --------------------------------------------------------------- 水気胸
 
 
@@ -397,7 +428,17 @@ def test_report_labelsが無ければ絞り込み時は対象外():
 def test_schema_versionが上がったら止まる():
     """上流が形式を変えたら黙って古い解釈を続けない。"""
     with pytest.raises(ReportLabelError):
-        enrich_labels(base_labels(), make_report_labels(schema_version=2))
+        enrich_labels(base_labels(), make_report_labels(schema_version=3))
+
+
+def test_胸水キーを持たない旧版schemaは受け付けない():
+    """版 1 には ``pleural_effusion_status`` が無く、黙って全件 unknown を出す。
+
+    上流の胸水対応（schema 2 / rules r3）より前のファイルで再エクスポートすると、
+    胸水フラグが全サンプル unknown のデータセットが**エラーも出さずに**できてしまう。
+    """
+    with pytest.raises(ReportLabelError):
+        enrich_labels(base_labels(), make_report_labels(schema_version=1))
 
 
 # ----------------------------------------------------------------- 不変条件

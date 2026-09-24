@@ -187,11 +187,9 @@ class ReportLabels:
     pneumothorax_status: str = "unknown"
     pneumothorax_side: str | None = None
     bulla_bleb_status: str = "unknown"
-    #: 胸水の有無。上流の ``report_labels`` には ``bulla_bleb_status`` のような
-    #: 専用キーが**無い**ので、``finding_labels_observed`` に ``pleural_effusion``
-    #: が出たかどうかだけを 2 値（``present`` / ``unknown``）で写す。
-    #: ``absent`` は出さない —— 観測リストに無いのは「記載なし」と「明示的に陰性」の
-    #: 両方を含み、区別できないため。上流が専用キーを持ったらそちらへ切り替える。
+    #: 胸水の有無。上流 schema_version 2（rules r3）から専用キーになった 3 値。
+    #: ``absent`` は上流が ``structured_negative``（レポートが明示的に「胸水なし」と
+    #: 書いている）と判定したものだけで、``no_mention`` は ``unknown`` のまま来る。
     pleural_effusion_status: str = "unknown"
     #: 観測された陽性所見の数。「レポートは在るが陽性所見が1つも無い」＝
     #: 明示的な陰性根拠かどうかの判定にだけ使う（所見名そのものは持たない）。
@@ -206,6 +204,14 @@ class ReportLabels:
     bulla_bleb_evidence: str | None = None
     bulla_bleb_certainty_max: str | None = None
     bulla_bleb_certainty_counts: tuple[tuple[str, int], ...] = ()
+    pleural_effusion_evidence: str | None = None
+    pleural_effusion_certainty_max: str | None = None
+    pleural_effusion_flags: tuple[str, ...] = ()
+    #: 胸水 ``present`` の**元の所見名**（``pleural_effusion`` / ``hemothorax``）。
+    #: 上流は血胸を胸水 ``present`` に畳むが、畳む前の名前を残さないと
+    #: 「胸水なのか血胸なのか」が下流から分からなくなる。``finding_labels_observed``
+    #: 全体は持たず（語彙が統制されていない）、**この2語だけ**を照合して写す。
+    pleural_effusion_findings: tuple[str, ...] = ()
     abnormal_finding_status: str = "unknown"
     needs_review: bool = False
     flags: tuple[str, ...] = ()

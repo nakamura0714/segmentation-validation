@@ -67,7 +67,11 @@ DEFAULT_STATUSES: tuple[str, ...] = (PRESENT, ABSENT)
 
 #: 対応する ``report_labels`` のブロック形式版。上流が上げたら追随するまで止める
 #: （``template.validate_coverage`` と同じ「黙って古い解釈を続けない」思想）。
-SUPPORTED_SCHEMA_VERSION = 1
+#:
+#: 2（rules r3 / 2026-09-24）で胸水の専用キー群が入った。**1 は受け付けない** ——
+#: 版 1 のファイルには ``pleural_effusion_status`` が無く、黙って全サンプル
+#: ``unknown`` の胸水フラグを出すことになるため。
+SUPPORTED_SCHEMA_VERSION = 2
 
 #: テンプレートが ``pneumothorax_side`` に許す値。患者から見た解剖学的左右。
 SIDES = frozenset({"left", "right", "bilateral"})
@@ -289,10 +293,12 @@ def enrich_labels(base: SampleLabels, report: ReportLabels | None) -> EnrichResu
             )
 
     # --- pleural_effusion_status ---
-    # **レポートが作れるのは present だけ。** 上流は観測リストに胸水が出たかどうかしか
-    # 返さない（``ReportLabels`` の docstring）ので、ここから ``absent`` は生まれない。
-    # ``absent`` は annotation の明示正常だけが根拠（``build_labels``）。
-    # 動かせるのは unknown からの1方向だけ。確定した値は present / absent とも維持する。
+    # 上流 schema 2 から ``present`` / ``absent`` / ``unknown`` を返す。``absent`` は
+    # レポートが明示的に「胸水なし」と書いたもの（``structured_negative``）だけで、
+    # 記載が無いだけの ``no_mention`` は ``unknown`` のまま来る。
+    # **記載が無いことを陰性に読み替えるのは上流でもここでもしていない。**
+    # 動かせるのは unknown からの1方向だけ。確定した値は present / absent とも維持する
+    # （annotation の明示正常による ``absent`` はレポートの ``present`` に勝つ）。
     effusion = report.pleural_effusion_status
     if effusion in (PRESENT, ABSENT):
         if labels.pleural_effusion_status == UNKNOWN:

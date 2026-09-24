@@ -1,4 +1,6 @@
-# 胸水フラグ（`pleural_effusion_status`）対応と、上流付け直し後の再エクスポート
+# 胸水フラグ（`pleural_effusion_status`）対応と 2026-09-24 版の統合 lp-data 生成
+
+**状態: 完了**（統合JSONの生成と検証まで。Train/Val/Test の分割は未実施）
 
 ## Context
 
@@ -14,138 +16,154 @@ med-chest-metry-pi6 のテンプレート `dataset_template_pneumothorax.yaml` �
 | 条件 | `pleural_effusion_status` |
 |---|---|
 | 胸水 annotation がある（塗りつぶし / 矩形 / 縁取りを問わない）、またはレポートが胸水陽性 | `present` |
-| `normal_evidence`（`No Findings/normal`）の明示正常があり、**かつ所見 annotation が1件も無い** | `absent` |
+| annotation の明示正常（`No Findings/normal` **かつ所見 annotation が0件**）、またはレポートの**明示陰性**（`structured_negative`） | `absent` |
 | それ以外 | `unknown` |
 
-- **`absent` は annotation の明示正常だけが根拠。** アノテーションが無いだけ、または
-  レポートの陽性所見が0件（`case_evidence=explicit_negative_report`）というだけでは `absent` にしない。
-- 正常ラベルと所見 annotation が同居して矛盾している画像（実データ 166 枚）は **`unknown`**。
-  明示正常だけを条件にすると「所見あり」と「胸水は無い」を同時に主張することになる。
-  この条件により、胸水 `absent` は `abnormal_finding_status: absent` の部分集合になる。
-- **水気胸は気胸 `present` に含める**（上流が `pneumothorax_status: present` +
-  `pneumothorax_subtype: hydropneumothorax` で返し、取り込み側は status しか見ない）。
+- **記載が無いことを陰性に読み替えない。** annotation が無いだけ、レポートに記載が無いだけ
+  （`no_mention`）、レポートの陽性所見が0件（`explicit_negative_report`）はいずれも `unknown`。
+- **血胸（`hemothorax`）は胸水 `present` に含める。** 上流が畳んでおり（68 study / 70画像、
+  すべて `structured_positive`）、畳む前の所見名は `pleural_effusion_findings` に残して
+  根拠（`evidence` / `certainty_max` / `flags`）とともに分析用CSVへ出す。
+- **水気胸は気胸 `present` に含める。** 上流が `pneumothorax_status: present` +
+  `pneumothorax_subtype: hydropneumothorax` で返し、取り込み側は status しか見ない。
   胸水フラグは水気胸から自動的には立てず、胸水の根拠を見て独立に判定する。
-- 値が確定した後は動かさない。レポートが作れるのは `present` だけで、
-  `absent` との食い違いは値を維持して `LabelConflict` に残す
-  （理由は維持した側で決まる: `absent` を維持＝`explicit_negative_wins` /
-  `present` を維持＝`never_downgrade`）。
+- 正常ラベルと所見 annotation が同居して矛盾している画像（実データ 166 枚）は `unknown`。
+  明示正常だけを条件にすると「所見あり」と「胸水は無い」を同時に主張することになる。
+- 値が確定した後は動かさない。食い違いは primary を維持して `LabelConflict` に残す
+  （`absent` を維持＝`explicit_negative_wins` / `present` を維持＝`never_downgrade`）。
 
-## 実装（完了。再エクスポートは未実施）
+### `absent` の2つの由来は必ず区別する
+
+| 由来 | 件数（統合後） | 性質 |
+|---|---:|---|
+| annotation の明示正常 | 866 | `abnormal_finding_status: absent` と必ず一致。気胸 `true` にはならない |
+| レポートの明示陰性 | 719 | 所見の有無と独立。**気胸 `true` かつ胸水 `absent` は正当**（219件） |
+
+## 実装
 
 | ファイル | 変更 |
 |---|---|
-| `core/records.py` | `ReportLabels.pleural_effusion_status` |
-| `adapters/engineer_set.py` | `PLEURAL_EFFUSION_OBSERVED`。上流に専用キーが無いので `finding_labels_observed` に `pleural_effusion` が在るかだけを畳む（リストは従来どおり下流へ渡さない） |
+| `core/records.py` | `ReportLabels` に `pleural_effusion_status` / `_evidence` / `_certainty_max` / `_flags` / `_findings` |
+| `adapters/engineer_set.py` | 上流 schema 2 の専用キーを読む。`PLEURAL_EFFUSION_FINDINGS`（`pleural_effusion` / `hemothorax`）の2語だけを `finding_labels_observed` から照合して元の所見名を残す |
 | `lpdata_export/labels.py` | `PLEURAL_EFFUSION` / `HYDROPNEUMOTHORAX_SUBTYPE`、`SampleLabels.pleural_effusion_status`、`build_labels` の3値判定 |
 | `lpdata_export/sample.py` | `FIELD_BUILDERS` に追加（テンプレートとのキー一致） |
 | `lpdata_export/invariants.py` | `PLEURAL_KEY` を label_map 検査へ |
-| `lpdata_export/report_labels.py` | レポートによる補強、`_effusion_conflict_reason` |
+| `lpdata_export/report_labels.py` | `SUPPORTED_SCHEMA_VERSION = 2`（版1は**受け付けない**）、レポートによる補強、`_effusion_conflict_reason` |
 | `lpdata_export/merge.py` | 統合時の補強、`effusion_counts_after`、summary 節 |
-| `lpdata_export/export.py` | 分析用CSVの列（`pleural_effusion_status` / `report_pleural_effusion_status`） |
+| `lpdata_export/export.py` | 分析用CSVの列（status / evidence / certainty / flags / findings） |
+| `scripts/verify_lpdata.py` | 出来上がったJSONを読み戻す検証（新規） |
 | `README.md` | ラベル規則の表と不変条件 |
-| `tests/` | conftest の `effusion` 引数、labels / report_labels / merge / export に 11 本追加 |
+| `tests/` | conftest の `effusion` 系引数、labels / report_labels / merge / export に 15 本追加 |
 
-### 実データでの検算（読み取りのみ。書き出しはしていない）
+**版1を受け付けない理由**: 版1には胸水の専用キーが無く、黙って全サンプル `unknown` の
+データセットができてしまう。`check_schema` で止める（`template.validate_coverage` と同じ思想）。
 
-`output/development/20260918/development_merged.json`（42,597画像）を `build_labels` に通した結果:
+## 生成した 2026-09-24 版
 
-| 値 | 件数 |
-|---|---:|
-| `present` | 474 |
-| `absent` | **855** |
-| `unknown` | 41,268 |
+### 入力（すべて絶対パス。glob も「最新自動選択」も使っていない）
 
-`absent` 855 は `No Findings/normal` のヒット 1,024 枚から、所見 annotation と同居する
-166 枚と胸水そのものが付いている 3 枚を除いた数（`abnormal_finding_status: absent` と同数になる）。
-施設別の `present` は ofuna 230 / segmed 111 / kajinoki 26 / tokyo_medical 25 / asahikawa 19 ほか。
+| 役割 | パス |
+|---|---|
+| primary | `/mnt/project/chest/metry/pi6/work/nakamura/segmentation-validation/output/development/20260918b/development_merged.json` |
+| secondary | `/mnt/project/chest/metry/pi6/work/nakamura/ofuna_chuo_report/output/dataset/merged/engineer-set-ETR_ChestMetry_OFC_report-20260924_053010.json` |
+| テンプレート | `/mnt/project/chest/metry/pi6/work/nakamura/med-chest-metry-pi6/src/chest_metry_pi6/data/dataset_template_pneumothorax.yaml` |
 
-## 上流（ofuna_chuo_report）待ち
+**primary に `20260918b` を選んだ理由**: `20260918` と fingerprint は同じ（`v_78b89657d448`、
+入力13本は同一）だが、`b` は 2026-09-18 の目視判定「呼気撮影の疑い」7件（`expiration_suspected`、
+`review/review_decisions.csv` に記録）を反映した後の版。`20260918`（10:41 生成）はこの判定より前で
+7件を含んだままなので、`b`（42,590画像 / 17,904 annotation）を採る。
 
-**再エクスポートはしない。** 大船中央レポジトリで気胸・胸水のレポートラベルを付け直しているため、
-いま走らせても捨てる版ができる。上流が確定してから下記を実行する。
+**secondary の同一ビルド確認**: `output/csv/sample_labels.csv`（184,919行）と
+`output/provenance/provenance.json` は engineer-set（05:30:10）と同じ実行の成果物
+（`generated_at` 2026-09-24T05:30:59Z、`rules_version` 全行 `r3`、`inputs_fingerprint` 記録あり、
+`verification.violations` 空、`n_reports_read` 180,877）。
 
-上流に確認すること:
-
-1. `report_labels` に `pleural_effusion_status` 相当の**専用キー**が入るか。
-   入るなら `adapters/engineer_set.py` の `finding_labels_observed` からの畳み込みを
-   そちらへ切り替える（`PLEURAL_EFFUSION_OBSERVED` の定数と `_report_labels` の1行だけ）。
-2. `schema_version` が上がるか。上がるなら `report_labels.SUPPORTED_SCHEMA_VERSION` を
-   追随させるまでエクスポートは意図的に止まる。
-3. 胸水の陰性（明示的に「胸水なし」）を返すようになるか。返すなら
-   レポート由来の `absent` を認めるかどうかを再判断する（現行は認めない）。
-
-## 上流確定後の再エクスポート手順
-
-**原本・シンボリックリンク先・既存の出力版は変更しない。** 出力は新しいディレクトリと新しい版名に出す
-（`<NEW>` は実行日、`dataset_id` は現行の `..._2026_005` の次を採る）。
-マスク出力先は入力ごとに必ず分ける（ファイル名が `<sample_id>.png` なので共有すると前版を上書きする）。
+### 実行コマンド
 
 ```bash
 cd /mnt/project/chest/metry/pi6/work/nakamura/segmentation-validation
-NEW=2026MMDD    # 実行日
 
-# 1. primary（development 由来）
 uv run segmentation-validation export-lpdata \
-  --merged output/development/20260918/development_merged.json \
-  --out output/lpdata/$NEW/chest_metry_pi6_pneumothorax.json \
-  --mask-output-dir /mnt/project/chest/metry/pi6/dataset/masks/pneumothorax_$NEW \
-  --mask-mode generate
+  --merged output/development/20260918b/development_merged.json \
+  --out output/lpdata/20260924/chest_metry_pi6_pneumothorax.json \
+  --image-output-dir /mnt/project/chest/metry/pi6/dataset/img_png \
+  --mask-output-dir /mnt/project/chest/metry/pi6/dataset/masks/pneumothorax_20260924 \
+  --mask-mode generate \
+  --dataset-id chest_metry_pi6_pneumothorax_2026_008 \
+  --owner kosuke.nakamura
 
-# 2. secondary（OFC 読影レポート。上流の確定版に差し替える）
 uv run segmentation-validation export-lpdata-ofc \
-  --source <上流が出した engineer-set-ETR_ChestMetry_OFC_report-*.json の確定版> \
-  --out output/lpdata/$NEW/ofc_report.lpdata.json \
-  --mask-output-dir output/lpdata/$NEW/masks/pneumothorax_ofc \
-  --artifact-prefix ofc_
+  --source /mnt/project/chest/metry/pi6/work/nakamura/ofuna_chuo_report/output/dataset/merged/engineer-set-ETR_ChestMetry_OFC_report-20260924_053010.json \
+  --out output/lpdata/20260924/ofc_report.lpdata.json \
+  --image-output-dir /mnt/project/chest/metry/pi6/dataset/img_png \
+  --mask-output-dir output/lpdata/20260924/masks/pneumothorax_ofc \
+  --artifact-prefix ofc_ \
+  --dataset-id chest_metry_pi6_pneumothorax_2026_009 \
+  --owner kosuke.nakamura
 
-# 3. 統合
 uv run segmentation-validation merge-lpdata \
-  --primary output/lpdata/$NEW/chest_metry_pi6_pneumothorax.json \
-  --secondary output/lpdata/$NEW/ofc_report.lpdata.json \
-  --out output/lpdata/${NEW}_merged/chest_metry_pi6_pneumothorax.json \
-  --template /mnt/project/chest/metry/pi6/work/nakamura/med-chest-metry-pi6/src/chest_metry_pi6/data/dataset_template_pneumothorax.yaml \
-  --dataset-id chest_metry_pi6_pneumothorax_2026_006 \
-  --dry-run   # まず裁定だけ見る。問題なければ --dry-run を外す
+  --primary output/lpdata/20260924/chest_metry_pi6_pneumothorax.json \
+  --secondary output/lpdata/20260924/ofc_report.lpdata.json \
+  --out output/lpdata/20260924_merged/chest_metry_pi6_pneumothorax.json \
+  --template /mnt/.../dataset_template_pneumothorax.yaml \
+  --dataset-id chest_metry_pi6_pneumothorax_2026_010 \
+  --owner kosuke.nakamura        # 先に --dry-run で裁定を確認してから実行
 ```
 
-### 検証項目
+`--image-output-dir` は**必ず指定する**。省くと出力ディレクトリ配下へ 42,590 枚を
+再変換し始める（既存の共有PNG 48,847 枚を使わない）。
 
-1. `meta.structure` に `pleural_effusion_status` があり、全サンプルが 3 値のいずれかを持つ
-   （`merge` の不変条件チェックが違反0件で通ること）。
-2. `pleural_effusion_status` の分布。**primary 側は present 474 / absent 855 が目安**
-   （上流の付け直しは secondary にしか効かないので、primary はこの数字から動かないはず。
-   動いたら `development_merged.json` の作り直しが混ざっている）。
-3. `absent` が `abnormal_finding_status: absent` の部分集合であること。
-4. `pleural_effusion_status: absent` かつ `pneumothorax_case: true` が0件であること
-   （明示正常は気胸陰性でもあるので、出たら `normal_evidence` の扱いが壊れている）。
-5. merge summary の「胸水の食い違い」（`explicit_negative_wins` / `never_downgrade`）を目視。
-   件数が多ければ上流の陰性定義とこちらの明示正常が食い違っている。
-6. 水気胸: `ofc_report_labels.csv` の `pneumothorax_subtype=hydropneumothorax` が
-   すべて `pneumothorax_case: true` で入っていること。胸水フラグは独立に判定されるので、
-   水気胸だからといって `present` になっていないこと。
-7. `output/research/` の分布レポートを新版で作り直す
-   （`scripts/lpdata_distribution.py <新しいJSON>`）。
+`dataset_id` は `_2026_001`〜`_2026_007` が使用済みだったので 008 / 009 / 010 を採った
+（`_2026_006` は `output/lpdata/20260918b/`、`_2026_007` は
+`output/lpdata/20260918b_merged/chest_metry_pi6_pneumothorax_ver2.json` が使用中）。
+
+### 成果物
+
+| 用途 | パス | dataset ID | サンプル数 |
+|---|---|---|---:|
+| primary | `output/lpdata/20260924/chest_metry_pi6_pneumothorax.json` | `..._2026_008` | 42,590 |
+| secondary | `output/lpdata/20260924/ofc_report.lpdata.json` | `..._2026_009` | 6,824 |
+| **統合（分割ツールへ渡すもの）** | **`output/lpdata/20260924_merged/chest_metry_pi6_pneumothorax.json`** | **`..._2026_010`** | **48,837** |
+| 気胸マスク | `/mnt/project/chest/metry/pi6/dataset/masks/pneumothorax_20260924` | — | 3,524 |
+
+### 検証結果
+
+統合後（`scripts/verify_lpdata.py`）:
+
+```
+[structure] テンプレート一致 True / ビルダ一致 True / キー違い 0
+[pneumothorax_case]       False 40,823 / True 8,014（うちマスクあり 3,524）
+[pleural_effusion_status] absent 1,585 / present 3,258 / unknown 43,994
+[abnormal_finding_status] absent 866 / present 6,691 / unknown 41,280
+[気胸 false でマスクあり] 0
+[patient_id / facility_id / image_file / dicom_file] 欠損 0
+[患者] 42,608 / [施設] 35 / [不変条件] 違反 0
+```
+
+- **ラベル衝突 0 件。** 裁定 386 件はすべて補強
+  （`pneumothorax_side` 335 / `pleural_effusion_status` 169 / `pneumothorax_case` 70 /
+  `bulla_bleb_status` 8）。気胸マスクの食い違い 6 件は従来どおり primary 採用。
+- primary 単体の胸水は `present 474 / absent 855` で事前の目安と一致。
+- 画素重複は前版（`20260918_merged`）と**完全一致**（バイト一致 15 組、増減なし）。
+  結果は `output/research/data/duplicate-images_20260924_merged.csv`。
+
+## 上流（ofuna_chuo_report）へ戻す修正
+
+エクスポーターにその場限りの例外処理は入れていない。以下は上流側の修正が要る。
+
+| sample_id | 状況 |
+|---|---|
+| `CXOFC00045055_002_002_000` | `pleural_effusion_flags` に `resolution_wording` が立っている（本文「みぎ胸水は消失したと考える」）のに `pleural_effusion_status: present` のまま。**消失表現を status へ反映する修正が要る** |
+| `CXOFC00005931_025_001_000` | 画像確認で正常と確定した一方、レポートは胸水 `present`（`text_only_mention`）。レポート側のラベルが誤りの可能性 |
+
+どちらも `needs_review: true` なので上流のレビュー対象には載っている。
+**両者とも上流の `pneumothorax_status` が `unknown` のため取り込み範囲外となり secondary に入らず、
+最終値は primary の明示正常（気胸 `false` / 胸水 `absent`）がそのまま残った。**
+レポートの胸水 `present` を裁定で退けた結果ではない点に注意。
 
 ## 未解決
 
-### 現時点で出る胸水の食い違い（2 件）
-
-上流の付け直し前の版（`...OFC_report-20260917_004313.json`）との突き合わせで、
-primary が `absent`（明示正常）／レポートが胸水陽性になるのは **2 件だけ**。
-両方とも**元データ側の問題**で、こちらの裁定規則の問題ではない。
-（一致する側は 181 件: primary `present` × レポート陽性。）
-
-| sample_id | 内容 |
-|---|---|
-| `CXOFC00005931_025_001_000` | レポートは「ひだり肺門下部の液面形成 hydro-pneumothorax」「chest tube 挿入」「みぎに微量の胸水」と書いている一方、**annotation 側には `No Findings/normal` が付いていて所見が1件も無い**。明示正常のほうが誤っている可能性が高い。`pneumothorax_case` も `explicit_negative_wins` で `false` に固定されるので、**胸水だけでなく気胸の判定にも影響する**。annotation の正常ラベルを見直す対象 |
-| `CXOFC00045055_002_002_000` | レポートの胸水は `probable` で、本文が「**みぎ胸水は消失したと考える**」。上流が消失表現を拾えずに present を立てている（`output/research/lpdata_distribution_20260917.md` §12 の `resolution_wording` 取りこぼしと同じ問題）。annotation の `absent` のほうが妥当 |
-
-上流の付け直しで 2 の類は減るはず。再エクスポート後にこの 2 件が残るかを確認する。
-
-### そのほか
-
-- レポート由来の胸水は現状 `finding_labels_observed` の1語に依存している。上流が専用キーを
-  持つまでは、上流の語彙が変わると黙って `unknown` に倒れる（テストは合成データで固定しているが、
-  実データ側の検知手段が無い）。上流確定時に 1 の確認を必ず行う。
 - 正常ラベルと所見 annotation が同居する 166 枚は元データの矛盾。胸水では `unknown` に
   逃がしたが、元データ側の是正は別件。
+- `output/research/` の分布レポートは 20260917 / 20260918_merged 版のまま。新版で作り直すなら
+  `uv run python scripts/lpdata_distribution.py output/lpdata/20260924_merged/chest_metry_pi6_pneumothorax.json`。

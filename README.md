@@ -785,7 +785,7 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 | `abnormal_finding_status` | `Findings` の geometry annotation あり→`present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 6,680 / 853 / 35,041 |
 | `pneumothorax_case` | 気胸 annotation が1件以上 | true 3,521 |
 | `bulla_bleb_status` | `bulla_bleb` があれば `present`、他は `unknown`（`absent` は出さない） | present 234 |
-| `pleural_effusion_status` | 胸水 annotation があれば `present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 再エクスポート待ち |
+| `pleural_effusion_status` | 胸水 annotation があれば `present` / 明示の `No Findings/normal` があり所見 annotation が0件→`absent` / それ以外→`unknown`（血胸も胸水に含む。レポート由来の明示陰性も `absent`） | 再エクスポート待ち |
 | `pneumothorax_side` | 常に `null`（患者基準の解剖学的左右で、画像からは起こせない） | — |
 
 拾った所見名（`pneumothorax` / `nodule` 等16語）は**出力属性ではない**。

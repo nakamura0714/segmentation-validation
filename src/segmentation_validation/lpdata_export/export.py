@@ -392,6 +392,11 @@ def _report_fields(report: Any) -> dict[str, Any]:
         "bulla_bleb_certainty_counts": dict(report.bulla_bleb_certainty_counts),
         "pleural_effusion_status": None,
         "report_pleural_effusion_status": report.pleural_effusion_status,
+        "pleural_effusion_evidence": report.pleural_effusion_evidence,
+        "pleural_effusion_certainty_max": report.pleural_effusion_certainty_max,
+        "pleural_effusion_flags": list(report.pleural_effusion_flags),
+        # 上流が血胸を胸水 present に畳む前の所見名。判定根拠として残す。
+        "pleural_effusion_findings": list(report.pleural_effusion_findings),
         "abnormal_finding_status": None,
         "observed_finding_count": report.observed_finding_count,
         "flags": list(report.flags),

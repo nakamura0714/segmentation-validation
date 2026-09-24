@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
   "meta": {
-    "generated_at": "2026-09-18T09:10:10.396666+00:00",
+    "generated_at": "2026-09-24T06:51:07.746675+00:00",
     "dataset_name": "pi6-validation",
     "n_annotations": 2426,
-    "n_images": 43
+    "n_images": 58
   },
   "decisions": [
     {
@@ -22271,6 +22271,156 @@
       "reviewer": "unknown",
       "reviewed_at": "2026-09-16T00:00:00+00:00",
       "comment": "2026-09-16 会議で exclude に決定（ANN_EIRLPRJ_01334 と同一画像）",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "asahikawa/CXASW00000810_001/CXASW00000810_001_001/CXASW00000810_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "asahikawa/CXASW00000826_001/CXASW00000826_001_001/CXASW00000826_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "cdc_bangkok/CXCDC00000001_000/CXCDC00000001_000_000/CXCDC00000001_000_000_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "eiju_sogo/CXEJS00000221_001/CXEJS00000221_001_001/CXEJS00000221_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "eiju_sogo/CXEJS00000349_001/CXEJS00000349_001_001/CXEJS00000349_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "eiju_sogo/CXEJS00000561_001/CXEJS00000561_001_001/CXEJS00000561_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ETR_ChestMetry_PI6px_with_mask136",
+      "image_key": "eiju_sogo/CXEJS00000599_001/CXEJS00000599_001_001/CXEJS00000599_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTE_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000806_002/CXASW00000806_002_001/CXASW00000806_002_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTE_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000810_001/CXASW00000810_001_001/CXASW00000810_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTE_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000813_001/CXASW00000813_001_001/CXASW00000813_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTE_CX_MT_PI3_pneumothorax",
+      "image_key": "eiju_sogo/CXEJS00000561_001/CXEJS00000561_001_001/CXEJS00000561_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTR_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000806_002/CXASW00000806_002_001/CXASW00000806_002_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTR_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000810_001/CXASW00000810_001_001/CXASW00000810_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTR_CX_MT_PI3_pneumothorax",
+      "image_key": "asahikawa/CXASW00000813_001/CXASW00000813_001_001/CXASW00000813_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "PTR_CX_MT_PI3_pneumothorax",
+      "image_key": "eiju_sogo/CXEJS00000561_001/CXEJS00000561_001_001/CXEJS00000561_001_001_000",
+      "decision": "exclude",
+      "reason": "duplicate_image_not_adopted",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-24T00:00:00+00:00",
+      "comment": "2026-09-24 目視判定: 同一画像が別 patient_id で二重登録。マスク面積が大きい側を採用。同一 image_path を持つ全 dataset_id を除外しないと別データセットから復活する",
       "legacy_file_uid": ""
     }
   ]

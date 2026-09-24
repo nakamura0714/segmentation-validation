@@ -58,9 +58,10 @@ IMAGE_PATH_DEPTH = 8
 #: ofuna_chuo_report が名前空間キーとして足すもので、通常の engineer-set には無い。
 REPORT_LABELS_KEY = "report_labels"
 
-#: ``finding_labels_observed`` から唯一拾う所見名（胸水）。詳細は
-#: ``_report_labels`` の docstring。annotation 側の ``code_text_eng`` と同じ綴り。
-PLEURAL_EFFUSION_OBSERVED = "pleural_effusion"
+#: 胸水 ``present`` の根拠になりうる所見名。**上流はこの2つを胸水に畳む**
+#: （血胸も胸水として扱う規則。2026-09-24 確定）。``finding_labels_observed``
+#: からはこの2語だけを照合して元の所見名として残す。詳細は ``_report_labels``。
+PLEURAL_EFFUSION_FINDINGS = ("pleural_effusion", "hemothorax")
 
 
 def dataset_id_for(path: Path) -> str:
@@ -309,10 +310,12 @@ def _report_labels(study: dict[str, Any], study_key: str) -> ReportLabels | None
     「レポートは在るが陽性所見が1件も無い」は明示的な陰性根拠になるが、
     所見名そのものは判定にも出力にも使わないため。
 
-    唯一の例外が ``pleural_effusion``。上流に ``pleural_effusion_status`` に
-    あたるキーが無く、胸水の有無はこのリストにしか出ない。リストを下流へ渡さず、
-    **この1語が在るかどうかだけ**を ``pleural_effusion_status`` に畳んで持つ
-    （語彙が統制されていない問題は「1語を決め打ちで照合する」ことで回避する）。
+    唯一の例外が ``PLEURAL_EFFUSION_FINDINGS`` の2語。胸水の判定そのものは上流の
+    ``pleural_effusion_status``（schema_version 2 以降の専用キー）を使うが、
+    上流は**血胸を胸水 present に畳む**ので、畳む前の所見名を残さないと
+    「胸水なのか血胸なのか」が下流から分からなくなる。リスト全体は渡さず、
+    **この2語だけ**を照合して ``pleural_effusion_findings`` に写す
+    （語彙が統制されていない問題は「決め打ちの語だけを照合する」ことで回避する）。
     観測リストに載るのは ``present: true`` の所見だけである（実レポート 80 件で
     確認: 載っている 40 件は全て ``present: true``、載っていない 40 件は
     finding 自体が無いか ``present: false`` のみ）。
@@ -326,8 +329,14 @@ def _report_labels(study: dict[str, Any], study_key: str) -> ReportLabels | None
         pneumothorax_status=str(raw.get("pneumothorax_status") or "unknown"),
         pneumothorax_side=raw.get("pneumothorax_side"),
         bulla_bleb_status=str(raw.get("bulla_bleb_status") or "unknown"),
-        pleural_effusion_status=(
-            "present" if PLEURAL_EFFUSION_OBSERVED in observed_list else "unknown"
+        pleural_effusion_status=str(raw.get("pleural_effusion_status") or "unknown"),
+        pleural_effusion_evidence=raw.get("pleural_effusion_evidence"),
+        pleural_effusion_certainty_max=raw.get("pleural_effusion_certainty_max"),
+        pleural_effusion_flags=tuple(
+            str(f) for f in (raw.get("pleural_effusion_flags") or ())
+        ),
+        pleural_effusion_findings=tuple(
+            name for name in PLEURAL_EFFUSION_FINDINGS if name in observed_list
         ),
         observed_finding_count=len(observed) if isinstance(observed, list) else 0,
         pneumothorax_subtype=raw.get("pneumothorax_subtype"),
