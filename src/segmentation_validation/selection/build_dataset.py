@@ -11,6 +11,13 @@
 ★ただし ``image_decisions`` で画像そのものが ``exclude`` と判定された場合は
 **file entry ごと落とす**。これは「画像を落とす」という明示的な判断があった場合
 （側面像など）だけで、annotation の除外による副作用ではない。
+
+**器（series / study / institution）は file entry とは別の規則で扱う。**
+画像を1枚も持たなくなった器は統合JSONから取り除く（:func:`prune_empty_containers`）。
+上の「0件でも残す」規則は file entry（＝実在する画像1枚）についてのものであり、
+器は中身が0なら何も表していない。剪定しても画像と annotation は1件も動かないので
+母集団は不変。★剪定は**全データセットの merge が終わってから**行う —— それより前だと
+``_record_conflicts`` が「片方のデータセットで空」の属性食い違いを取り逃す。
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..config import Config
 from ..core.records import source_generated_at
@@ -60,6 +67,22 @@ def gate_message(
         f"{subject} {count} 件が {kind} のまま。"
         f"目視を進めるか `{flag} --{kind}-as keep|exclude` を明示すること"
     )
+
+
+def file_uid_for(
+    source_json: str,
+    institution: str,
+    study_key: str,
+    series_key: str,
+    file_key: str,
+) -> str:
+    """画像1枚を指す ``file_uid``。
+
+    ``image_decisions.csv`` / ``image_duplicates.csv`` / lpdata の
+    ``measurements.jsonl`` が同じ書式を使う。**突合できることが価値の中心**なので、
+    書式を1か所に閉じて散らさない。
+    """
+    return f"{source_json}::{institution}/{study_key}/{series_key}/{file_key}"
 
 
 @dataclass
@@ -156,9 +179,8 @@ def build_development_payload(
                 # 画像そのものを落とすと判定されたものを先に取り除く。
                 dropped = []
                 for file_key in list(file_list):
-                    uid = (
-                        f"{source_json}::{institution}"
-                        f"/{study_key}/{series_key}/{file_key}"
+                    uid = file_uid_for(
+                        source_json, institution, study_key, series_key, file_key
                     )
                     verdict = images.get(uid)
                     result.images_total += 1
@@ -520,6 +542,268 @@ def write_merged_json(payload: dict[str, Any], out_path: Path) -> Path:
     return out_path
 
 
+# -------------------------------------------------- 空の器の剪定（統合後）
+
+
+@dataclass
+class PruneResult:
+    """取り除いた器の数。**画像と annotation は1件も動かない。**"""
+
+    institutions: int = 0
+    studies: int = 0
+    series: int = 0
+    #: 取り除いた study のうち study レベルの分類ラベル（``annotations`` キー）を
+    #: 持っていたもの。画像が0枚なので ``FileGroup.case_labels`` 経由で下流へは
+    #: 元から届いていないが、黙って捨てないために数だけ残す（実データで48件、
+    #: 内訳は ``StudyAnno/002 異常あり`` と ``TB_label/002``。``No Findings``
+    #: ＝意図的な陰性症例は1件も含まれない）。
+    studies_with_case_labels: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "institutions": self.institutions,
+            "studies": self.studies,
+            "series": self.series,
+            "studies_with_case_labels": self.studies_with_case_labels,
+        }
+
+    def __bool__(self) -> bool:
+        """1件でも取り除いたか。剪定の冪等性チェックに使う。"""
+        return bool(self.institutions or self.studies or self.series)
+
+
+def prune_empty_containers(payload: dict[str, Any]) -> PruneResult:
+    """file entry を1件も持たない series / study / institution を取り除く。
+
+    空の器は判断の結果ではなく**副作用**。元JSON（engineer-set）13本には空の
+    series も空の study も1件も無く、``build_development_payload`` が
+    ``image_decisions`` に従って file entry を落とした結果として生まれる
+    （実データでは大半がクロスデータセット重複による skip）。器を残したまま
+    ``totals.studies`` を出すと、中身の無い study を数えた不正確な報告になる。
+
+    ★**全データセットの merge が終わってから**呼ぶこと。merge の前や途中で呼ぶと
+    ``_record_conflicts`` が「片方のデータセットで空」の属性食い違いを記録できなく
+    なる（実データで現在検出されている唯一の食い違いがまさにこの形 ——
+    ``ofuna_chuo/CXOFC00000041_004/..._001`` の ``shape`` が、画像を出す側で z=2、
+    画像0枚の側で z=1）。食い違いは元データ側の登録バグであり、どちらが画像を
+    出したかとは独立に報告し続ける必要がある。
+
+    ``finalize_merged`` の**前**に呼ぶこと。``totals`` は剪定後の構造を数える。
+
+    **剪定しないもの**: ``annotations: []`` の file entry。画像は実在するので
+    「0件でも残す」規則が優先する。剪定の対象はあくまで画像が0枚になった器。
+
+    ``patient`` は器ではない（``patient_id`` は study のスカラー属性）。その患者の
+    study が全部消えれば患者も自然に消える。
+    """
+    result = PruneResult()
+    dataset = payload.get("dataset") or {}
+    # dict を反復しながら削除できないので、キーのスナップショットを取る。
+    for institution in list(dataset):
+        studies = dataset[institution]
+        for study_key in list(studies):
+            study = studies[study_key]
+            series_list = study.get("series_list") or {}
+            for series_key in list(series_list):
+                if not (series_list[series_key].get("file_list") or {}):
+                    del series_list[series_key]
+                    result.series += 1
+            # series を消した直後に見るので、ボトムアップで1パスに収まる。
+            if not series_list:
+                if study.get("annotations"):
+                    result.studies_with_case_labels += 1
+                del studies[study_key]
+                result.studies += 1
+        if not studies:
+            del dataset[institution]
+            result.institutions += 1
+    return result
+
+
+# ------------------------------------------------ 統合の中身（明細と内訳）
+
+#: 明細CSVの列。1行 = 統合JSONの file entry 1件（= 画像1枚）。
+#: ``image_duplicates.csv`` と同じく監査用で、正本ではない
+#: （統合JSONからいつでも再生成できる）。列を足すときは README 4章の表も直すこと。
+DEVELOPMENT_MANIFEST_COLUMNS = (
+    "dataset_id",
+    "institution",
+    "patient_id",
+    "study_key",
+    "study_date",
+    "series_key",
+    "file_id",
+    "file_uid",
+    "image_path",
+    "n_annotations",
+    "lesion_classes",
+)
+
+#: ``lesion_classes`` 列の区切り。1画像に複数クラスが付く。
+#: ``detected_checks`` 等と同じ慣習。
+CLASS_SEPARATOR = "|"
+
+
+def build_development_manifest(
+    merged: Mapping[str, Any],
+    per_dataset: Mapping[str, Mapping[str, Any]],
+    row_sink: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """統合payloadを**1回だけ**走査し、明細行と内訳を同時に作る。
+
+    ``row_sink`` には ``csv.DictWriter.writerow`` をそのまま渡せる。行を list に
+    溜めないのは、実データ16,685行ぶんの dict を保持すると10MB強をピークへ
+    積み増すため。集計だけ欲しいときは ``None``。
+
+    ★呼ぶのは ``write_merged_json`` の後、payload を手放す前。走査は**読むだけ**で
+    payload を書き換えない（``dataset_id`` は ``merge_into`` が付与済み）。
+
+    ``per_dataset`` は dataset_id ごとの ``meta_development``。``file_uid`` を
+    組み立てる ``source_json`` をここから引く —— 統合payloadの file entry は
+    ``dataset_id`` しか持っておらず、元JSON名は分からないため。
+
+    戻り値は JSON 化できる素の dict（set も dataclass も返さない）。
+    report 層が元JSONの階層構造を知らずに表を書けるようにするため。
+
+    ★``patients`` / ``studies``（重複を畳んだ実数）は **file entry を1件でも持つ**
+    ものだけを数える。統合JSONには画像を1枚も持たない study が実데ータで170件あり
+    （空の ``file_list`` は共有 series でありふれた形）、それを合計側だけが数えると
+    「合計 < 各データセットの総和」という読めない表になる。データセット別の行と
+    同じ基準で数えることを優先する —— ``meta_development.totals.studies``
+    （構造上の総数）とは意図的に別の値。
+    """
+    source_jsons = {
+        dataset_id: str(meta.get("source_json") or "")
+        for dataset_id, meta in per_dataset.items()
+    }
+    stats: dict[str, dict[str, Any]] = {}
+    patients_all: set[str] = set()
+    studies_all: set[tuple[str, str]] = set()
+
+    for institution, studies in (merged.get("dataset") or {}).items():
+        for study_key, study in studies.items():
+            patient_id = str(study.get("patient_id") or study_key)
+            study_date = str(study.get("study_date") or "")
+            for series_key, series in (study.get("series_list") or {}).items():
+                for file_key, file_rec in (series.get("file_list") or {}).items():
+                    dataset_id = str(file_rec.get(DATASET_ID_KEY) or "")
+                    source_json = source_jsons.get(dataset_id, "")
+                    entry = stats.get(dataset_id)
+                    if entry is None:
+                        entry = stats[dataset_id] = _new_manifest_entry(source_json)
+                    annotations = file_rec.get("annotations") or []
+                    classes = _class_codes(annotations)
+
+                    # 施設 / 患者 / study / series はデータセットを跨いで
+                    # 重複するので、件数ではなく集合で持ってから畳む。
+                    patients_all.add(patient_id)
+                    studies_all.add((institution, study_key))
+                    entry["institutions"].add(institution)
+                    entry["patients"].add(patient_id)
+                    entry["studies"].add((institution, study_key))
+                    entry["series"].add((institution, study_key, series_key))
+                    entry["files"] += 1
+                    entry["annotations"] += len(annotations)
+                    if not annotations:
+                        entry["files_without_annotations"] += 1
+                    for code, count in classes.items():
+                        entry["classes"][code] = entry["classes"].get(code, 0) + count
+
+                    if row_sink is not None:
+                        row_sink(
+                            {
+                                "dataset_id": dataset_id,
+                                "institution": institution,
+                                "patient_id": patient_id,
+                                "study_key": study_key,
+                                "study_date": study_date,
+                                "series_key": series_key,
+                                "file_id": file_key,
+                                "file_uid": file_uid_for(
+                                    source_json,
+                                    institution,
+                                    study_key,
+                                    series_key,
+                                    file_key,
+                                ),
+                                "image_path": file_rec.get("image_path") or "",
+                                "n_annotations": len(annotations),
+                                "lesion_classes": CLASS_SEPARATOR.join(classes),
+                            }
+                        )
+
+    return _finalize_manifest(stats, patients_all, studies_all)
+
+
+def _new_manifest_entry(source_json: str) -> dict[str, Any]:
+    return {
+        "source_json": source_json,
+        "institutions": set(),
+        "patients": set(),
+        "studies": set(),
+        "series": set(),
+        "files": 0,
+        "annotations": 0,
+        "files_without_annotations": 0,
+        "classes": {},
+    }
+
+
+def _class_codes(annotations: list[dict[str, Any]]) -> dict[str, int]:
+    """画像1枚に付いた病変クラスと、その annotation 件数。
+
+    ``core.labels.parse_labels`` は呼ばない —— :class:`~..core.labels.Label` を
+    1.7万件ぶん作る必要がなく、同一性は ``Label.key`` の定義どおり
+    ``(code_system, code)`` だけで決まるため。
+    挿入順を保つので、そのまま ``|`` で繋げば列の値になる。
+    """
+    codes: dict[str, int] = {}
+    for annotation in annotations:
+        seen: set[str] = set()
+        for label in annotation.get("labels") or []:
+            code_system = label.get("code_system")
+            code = label.get("code")
+            if not code_system or not code:
+                continue
+            qualified = f"{code_system}/{code}"
+            if qualified in seen:
+                continue
+            seen.add(qualified)
+            codes[qualified] = codes.get(qualified, 0) + 1
+    return codes
+
+
+def _finalize_manifest(
+    stats: Mapping[str, dict[str, Any]],
+    patients_all: set[str],
+    studies_all: set[tuple[str, str]],
+) -> dict[str, Any]:
+    """集合を件数へ畳む。``patients`` / ``studies`` は実数（総和ではない）。"""
+    datasets: dict[str, Any] = {}
+    for dataset_id in sorted(stats):
+        entry = stats[dataset_id]
+        datasets[dataset_id] = {
+            "dataset_id": dataset_id,
+            "source_json": entry["source_json"],
+            "institutions": len(entry["institutions"]),
+            "patients": len(entry["patients"]),
+            "studies": len(entry["studies"]),
+            "series": len(entry["series"]),
+            "files": entry["files"],
+            "annotations": entry["annotations"],
+            "files_without_annotations": entry["files_without_annotations"],
+            # 件数降順→コード昇順。summary 側で上位N件を取るだけで済むように。
+            "classes": dict(
+                sorted(entry["classes"].items(), key=lambda kv: (-kv[1], kv[0]))
+            ),
+        }
+    return {
+        "patients": len(patients_all),
+        "studies": len(studies_all),
+        "datasets": datasets,
+    }
+
+
 # ------------------------------------------------------ 画像重複の解消（横断）
 
 #: 監査用CSV/レポートの列。``keep``/``exclude`` という語は使わない —— 通常の
@@ -608,7 +892,9 @@ def resolve_image_duplicates(
     for row in selection_rows:
         if row["final_decision"] == Decision.KEEP.value:
             file_uid = row["file_uid"]
-            kept_annotation_counts[file_uid] = kept_annotation_counts.get(file_uid, 0) + 1
+            kept_annotation_counts[file_uid] = (
+                kept_annotation_counts.get(file_uid, 0) + 1
+            )
 
     candidates_by_path: dict[str, list[DuplicateCandidate]] = {}
     for row in image_rows:
@@ -668,7 +954,9 @@ def _pick_winner(candidates: list[DuplicateCandidate]) -> DuplicateCandidate:
 
     def sort_key(candidate: DuplicateCandidate) -> tuple[bool, float]:
         generated_at = source_generated_at(candidate.source_json)
-        timestamp = generated_at.timestamp() if generated_at is not None else float("-inf")
+        timestamp = (
+            generated_at.timestamp() if generated_at is not None else float("-inf")
+        )
         return (candidate.has_kept_annotations, timestamp)
 
     ordered = sorted(candidates, key=lambda c: c.dataset_id)
@@ -697,5 +985,7 @@ def _dedup_reason(
     reason += "で同率、"
     dates = {source_generated_at(c.source_json) for c in group}
     if len(dates) > 1:
-        return reason + ("登録日時が最も新しい" if is_winner else "登録日時が採用側より古い")
+        return reason + (
+            "登録日時が最も新しい" if is_winner else "登録日時が採用側より古い"
+        )
     return reason + "登録日時も同一のためdataset_id昇順"

@@ -35,6 +35,17 @@ PNEUMOTHORAX = "pneumothorax"
 #: ブラ / ブレブの所見名。元データは1語に結合されている。
 BULLA_BLEB = "bulla_bleb"
 
+#: 胸水の所見名。元データは ``code_text`` が「胸水(塗りつぶし）」「胸水（矩形）」
+#: 「胸水(縁取り）」の3通りに割れているが、``code_text_eng`` はこの1語に揃っている。
+PLEURAL_EFFUSION = "pleural_effusion"
+
+#: 水気胸。**annotation 側にこの所見は存在しない**（語彙は ``pneumothorax`` のみ）。
+#: 水気胸が気胸として入ってくる経路は構造化読影レポートだけで、上流は
+#: ``pneumothorax_status: present`` + ``pneumothorax_subtype: hydropneumothorax``
+#: として返す。``report_labels.enrich_labels`` は status しか見ないので、
+#: **水気胸は気胸に含まれる**（2026-09-24 に確定した方針）。subtype は分析用CSVに残す。
+HYDROPNEUMOTHORAX_SUBTYPE = "hydropneumothorax"
+
 PRESENT = "present"
 ABSENT = "absent"
 UNKNOWN = "unknown"
@@ -71,8 +82,9 @@ class SampleLabels:
     """1画像ぶんのラベル属性。
 
     ``finding_labels`` は**出力属性ではない**（テンプレートから削除された）。
-    ``abnormal_finding_status`` / ``pneumothorax_case`` / ``bulla_bleb_status`` を
-    決める材料として内部に持ち、summary の所見語彙一覧にも使う。
+    ``abnormal_finding_status`` / ``pneumothorax_case`` / ``bulla_bleb_status`` /
+    ``pleural_effusion_status`` を決める材料として内部に持ち、summary の所見語彙
+    一覧にも使う。
     """
 
     #: 拾えた所見名。出力JSONには載せない（判定の材料と summary 用）。
@@ -80,6 +92,12 @@ class SampleLabels:
     abnormal_finding_status: str
     pneumothorax_case: bool
     bulla_bleb_status: str
+    #: 胸水の有無。**``bulla_bleb_status`` とは違い3値すべてを作る。**
+    #: 胸水アノテーションがあれば ``present``、``normal_evidence`` の明示正常が
+    #: あれば ``absent``、それ以外は ``unknown``（判定は ``build_labels``）。
+    #: 既定を ``unknown`` にしてあるのは、このフィールドを渡さない旧い呼び出しが
+    #: **黙って陰性を作らない**ようにするため。
+    pleural_effusion_status: str = UNKNOWN
     #: 気胸の側（``left`` / ``right`` / ``bilateral``）。**既存 annotation からは
     #: 作らない**（テンプレートは患者基準の解剖学的左右と明記しており、画像座標から
     #: 起こすと全サンプルが反転する）。値が入るのは構造化読影レポート経由だけ。
@@ -175,11 +193,32 @@ def build_labels(
     # annotation からは判定できず、「無い」と「対象外」を区別する根拠が無いため。
     bulla_bleb_status = PRESENT if BULLA_BLEB in findings else UNKNOWN
 
+    # --- pleural_effusion_status: 3値すべて出す ---
+    # **bulla / bleb とは規則が違う。** 胸水 annotation があれば present、
+    # 正常例だと確定している症例は absent、それ以外は unknown。
+    #
+    # ``absent`` の条件は「``normal_evidence`` の明示正常があり、**かつ所見
+    # annotation が1件も無い**」。明示正常だけを条件にすると、正常ラベルと
+    # 所見 annotation が同居して矛盾している画像（実データで 166 枚）まで
+    # 「胸水は無い」と言い切ることになる。**そこは unknown に留める。**
+    # 他方の属性の値から導出しているのではなく、``abnormal_finding_status`` と
+    # 同じ材料（``findings`` / ``hits``）から独立に判定している。結果として
+    # 胸水 absent は所見 absent の部分集合になる。
+    #
+    # annotation が無いだけの画像も unknown（未アノテーションと陰性は別物）。
+    if PLEURAL_EFFUSION in findings:
+        pleural_effusion_status = PRESENT
+    elif hits and not finding_labels:
+        pleural_effusion_status = ABSENT
+    else:
+        pleural_effusion_status = UNKNOWN
+
     return SampleLabels(
         finding_labels=finding_labels,
         abnormal_finding_status=status,
         pneumothorax_case=pneumothorax_case,
         bulla_bleb_status=bulla_bleb_status,
+        pleural_effusion_status=pleural_effusion_status,
         normal_evidence_hits=hits,
         case_evidence=case_evidence,
     )

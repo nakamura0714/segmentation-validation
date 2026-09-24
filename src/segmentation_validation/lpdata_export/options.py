@@ -49,6 +49,11 @@ class ExportOptions:
     dataset_name: str | None = None
     dataset_id: str | None = None
     owner: str | None = None
+    #: ``meta.description``。未指定ならテンプレートの文言を引き継ぐが、
+    #: あちらは ``split: train`` 前提の文（「（train split）」）なので、
+    #: ``split`` を書かない本エクスポータではそのままだと矛盾する。
+    #: ``_split_agnostic_description`` が既定で差し替える。
+    description: str | None = None
 
     # --- モード ---
     image_mode: str = "convert"

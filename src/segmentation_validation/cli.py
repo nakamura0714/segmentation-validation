@@ -11,7 +11,7 @@ import json
 import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .adapters import open_adapters
 from .checks import ALL_CHECKS, requires_scan, selected_checks
@@ -201,6 +201,14 @@ def build_parser() -> argparse.ArgumentParser:
         "既定は config の lpdata_export.report_label_statuses。"
         "unknown は「気胸でない」ではなく「主張していない」の意味なので既定に入れない",
     )
+    # 共有パーサの既定（generate）を OFC 段だけ planned に落とす。
+    # OFC 側の価値は「マスクが無くても気胸症例だと分かる」ことであって、
+    # マスクの供給源ではない —— マスクを持つ画像は例外なく development 側にも
+    # あり、統合は重複時に必ず primary（人手整備済みのGT）を採るので、
+    # ここで書き出した PNG は1枚も参照されない（実測273枚すべて未参照）。
+    # planned でも画素は読むので、面積・lung_rect・統合時のマスク食い違い検出は
+    # そのまま効く。将来 OFC 単独のマスクが増えたら --mask-mode generate を明示する。
+    ofc.set_defaults(mask_mode="planned")
 
     merge = sub.add_parser(
         "merge-lpdata",
@@ -238,6 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--dataset-name", default=None, help="meta.dataset_name")
     merge.add_argument("--dataset-id", default=None, help="meta.dataset_id")
     merge.add_argument("--owner", default=None, help="meta.owner")
+    merge.add_argument("--description", default=None, help="meta.description")
 
     review = sub.add_parser("review", help="FiftyOne での目視レビュー")
     rsub = review.add_subparsers(dest="review_command", required=True)
@@ -836,6 +845,7 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
         gate_message,
         merge_into,
         new_merged_payload,
+        prune_empty_containers,
         resolve_image_duplicates,
         write_development_json,
         write_merged_json,
@@ -973,19 +983,41 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
         return EXIT_FAILURE
 
     if merged is not None:
+        # ★全データセットの merge が終わったこの位置でだけ剪定する。これより前で
+        # 剪定すると _record_conflicts が「片方のデータセットで空」の属性食い違いを
+        # 取り逃す。finalize_merged より前なのは totals に剪定後の構造を数えさせるため。
+        pruned = prune_empty_containers(merged)
         finalize_merged(
             merged,
             merge_result,
             per_dataset_meta,
-            meta_extra={"fingerprint": _fingerprint(config)},
+            meta_extra={
+                "fingerprint": _fingerprint(config),
+                "pruned": pruned.as_dict(),
+            },
         )
+        # 剪定は冪等。2回目で何か取れたら実装のバグなので生成物を信用しない。
+        if prune_empty_containers(merged):
+            logger.error("剪定後にも画像0枚の器が残っている。生成物を信用しないこと")
+            return EXIT_FAILURE
         merged_path = config.development_dir / version_tag / args.merged_name
         write_merged_json(merged, merged_path)
+        # 「最終開発データに何が入ったか」の明細。payload をまだ手放していない
+        # このタイミングでしか作れない（作り直すには元JSONの再パースが要る）。
+        manifest_path = (
+            config.development_dir / version_tag / "development_manifest.csv"
+        )
+        manifest = _write_development_manifest(manifest_path, merged, per_dataset_meta)
         totals = merge_result.as_totals()
         merged_summary = {
             "path": merged_path,
             "totals": totals,
             "conflicts": merge_result.conflicts,
+            "patients": manifest["patients"],
+            "studies": manifest["studies"],
+            "by_dataset": manifest["datasets"],
+            "manifest_path": manifest_path,
+            "pruned": pruned.as_dict(),
         }
         logger.info(
             "統合JSON: データセット %d / 施設 %d / study %d / series %d / "
@@ -997,6 +1029,17 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
             totals["files"],
             totals["annotations"],
             merged_path,
+        )
+        logger.info(
+            "統合JSONの明細（%d 行 = 画像1枚1行）-> %s", totals["files"], manifest_path
+        )
+        logger.info(
+            "画像0枚の器を剪定: series %d / study %d / 施設 %d"
+            "（うち study レベルの分類ラベルを持つ study %d。画像とannotationは不変）",
+            pruned.series,
+            pruned.studies,
+            pruned.institutions,
+            pruned.studies_with_case_labels,
         )
         if merge_result.conflicts:
             # 値を選ばず両方を記録してある。どちらが正かは元データ側の問題。
@@ -1015,6 +1058,13 @@ def _build_dataset(config: Config, args: argparse.Namespace) -> int:
             if args.strict_conflicts:
                 logger.error("--strict-conflicts: 食い違いを解消してから再実行する")
                 return EXIT_ISSUES
+    else:
+        # 明細は「統合JSONに何が入ったか」を表す監査物なので、統合JSONを
+        # 作らないときに出すと存在しないファイルの目録になる。
+        logger.info(
+            "--no-merged: 統合JSONを作らないので development_manifest.csv も作らない"
+            "（データセット別の件数は各 development.json の meta_development にある）"
+        )
 
     issues = _read_issues(out_dir / "issues.json")
     decisions = _read_selection(selection_path)
@@ -1062,6 +1112,29 @@ def _write_duplicate_report(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _write_development_manifest(
+    path: Path, merged: dict[str, Any], per_dataset: Mapping[str, Any]
+) -> dict[str, Any]:
+    """統合JSONに入った画像の明細をCSVへ書き、データセット別の内訳を返す。
+
+    ``image_duplicates.csv`` と同じ扱い（監査用・固定名・毎回上書き）。
+    1回の走査で書き出しと集計の両方が済むので、内訳のために統合payloadを
+    二度歩かない。
+    """
+    import csv
+
+    from .selection.build_dataset import (
+        DEVELOPMENT_MANIFEST_COLUMNS,
+        build_development_manifest,
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=DEVELOPMENT_MANIFEST_COLUMNS)
+        writer.writeheader()
+        return build_development_manifest(merged, per_dataset, writer.writerow)
 
 
 def _lpdata_common_parser() -> argparse.ArgumentParser:
@@ -1154,6 +1227,13 @@ def _lpdata_common_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-name", default=None, help="meta.dataset_name")
     parser.add_argument("--dataset-id", default=None, help="meta.dataset_id")
     parser.add_argument("--owner", default=None, help="meta.owner")
+    parser.add_argument(
+        "--description",
+        default=None,
+        help="meta.description。未指定ならテンプレートの文言を引き継ぐが、"
+        "split 前提の文なら split に触れない文へ差し替える"
+        "（本エクスポータは split を書かないため）",
+    )
     return parser
 
 
@@ -1241,6 +1321,7 @@ def _run_export_lpdata(
         dataset_name=args.dataset_name,
         dataset_id=args.dataset_id,
         owner=args.owner,
+        description=args.description,
         image_mode=args.image_mode,
         mask_mode=args.mask_mode,
         on_missing_dicom=args.on_missing_dicom,
@@ -1293,6 +1374,7 @@ def _merge_lpdata(config: Config, args: argparse.Namespace) -> int:
         dataset_name=args.dataset_name,
         dataset_id=args.dataset_id,
         owner=args.owner,
+        description=args.description,
         dry_run=args.dry_run,
         no_enrich=args.no_enrich,
     )

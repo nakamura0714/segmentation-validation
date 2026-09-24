@@ -347,6 +347,12 @@ def test_画像単位の採否(context, issues):
 # --- 統合JSON（学習パイプライン入力）の実測値
 # 12本の development.json を1本へ union した結果。上位階層は複数データセットで
 # 共有されるが、file 単位は衝突しない（resolve_image_duplicates が効いている）。
+#
+# ★★ studies / series は **画像0枚の器を剪定する前** の値で、現在の実装とは合わない。
+# さらにこの値は12データセット構成のもので、現構成（10本）とも合わない。
+# 測り直すには走査キャッシュが要る（`scan` → `check` → `select` → 再計測）。
+# 推測で埋めないこと。それまで studies / series の突き合わせは
+# test_統合JSONの規模 側で除外している。
 MERGED_TOTALS = {
     "datasets": 12,
     "institutions": 35,
@@ -355,6 +361,9 @@ MERGED_TOTALS = {
     "files": 42574,
     "annotations": 17933,
 }
+#: 剪定の影響を受けないキー。files と annotations は剪定で1件も動かない
+#: （器を消しても画像は減らない）ので、母集団の不変条件としてここで固定する。
+MERGED_TOTALS_STABLE = ("datasets", "institutions", "files", "annotations")
 #: 元データ間で食い違う属性。現状これ1件だけ。
 #: ChestMetry_PI6px_normal は 2020-01-11、
 #: ETR_ChestMetry_PI6px_abnormal_non_pneumothorax は 2019-01-05。
@@ -458,12 +467,49 @@ def merged(context, pipeline_decisions):
         )
         bd.merge_into(accumulator, payload, dataset_id, result)
         per_dataset[dataset_id] = payload["meta_development"]
-    return bd.finalize_merged(accumulator, result, per_dataset), result
+    # ★cli._build_dataset と同じ位置。全 merge の完了後・finalize_merged の前。
+    # ここより前で剪定すると _record_conflicts が「片方が空」の食い違いを取り逃す。
+    pruned = bd.prune_empty_containers(accumulator)
+    return (
+        bd.finalize_merged(
+            accumulator, result, per_dataset, meta_extra={"pruned": pruned.as_dict()}
+        ),
+        result,
+    )
 
 
 def test_統合JSONの規模(merged):
+    """★studies / series は剪定前の値のまま（MERGED_TOTALS のコメント参照）。
+
+    剪定で動かないキーだけを突き合わせる。files と annotations が不変であること自体が
+    「器を消しても母集団は変わらない」ことの実データ側の証拠になる。
+    """
     payload, _ = merged
-    assert payload["meta_development"]["totals"] == MERGED_TOTALS
+    totals = payload["meta_development"]["totals"]
+    assert {key: totals[key] for key in MERGED_TOTALS_STABLE} == {
+        key: MERGED_TOTALS[key] for key in MERGED_TOTALS_STABLE
+    }
+    # 剪定してあるので、器はすべて画像を1枚以上持つ。
+    assert totals["studies"] <= totals["files"]
+    assert totals["series"] <= totals["files"]
+
+
+def test_統合JSONに画像0枚の器が残らない(merged):
+    """剪定は冪等。2回目で何か取れたら剪定が効いていない。"""
+    from segmentation_validation.selection import build_dataset as bd
+
+    payload, _ = merged
+    assert not bd.prune_empty_containers(payload)
+
+
+def test_統合JSONのstudy数は明細の集計と一致する(merged):
+    """剪定の目的そのもの。規模行と内訳表の合計行が食い違わないこと。"""
+    from segmentation_validation.selection import build_dataset as bd
+
+    payload, _ = merged
+    meta = payload["meta_development"]
+    manifest = bd.build_development_manifest(payload, meta["datasets"])
+    assert meta["totals"]["studies"] == manifest["studies"]
 
 
 def test_統合JSONのfile単位のキーは衝突しない(merged):
@@ -599,3 +645,17 @@ def test_OFCの取り込み範囲():
     # 確信度はメタ情報であって学習GTではない。
     assert report["certainty_is_metadata"] is True
     assert report["certainty_max_counts"]["unlikely"] == 1
+
+
+def test_OFC段のマスクは最終成果物から参照されない():
+    """OFC 段でマスクを作っても使われないことの実データ側の証拠。
+
+    だから ``export-lpdata-ofc`` の ``--mask-mode`` 既定は ``planned``。
+    """
+    merged = _load(LPDATA_MERGED)
+    referenced = [
+        k
+        for k, v in merged["samples"].items()
+        if "pneumothorax_ofc" in (v["pneumothorax_mask"]["pixel_array"] or "")
+    ]
+    assert referenced == []

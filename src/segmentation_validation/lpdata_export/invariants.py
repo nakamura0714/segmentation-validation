@@ -36,8 +36,10 @@ STATUS_KEY = "abnormal_finding_status"
 CASE_KEY = "pneumothorax_case"
 SIDE_KEY = "pneumothorax_side"
 BULLA_KEY = "bulla_bleb_status"
+PLEURAL_KEY = "pleural_effusion_status"
 
-#: ``abnormal_finding_status`` / ``bulla_bleb_status`` の label_map。
+#: ``abnormal_finding_status`` / ``bulla_bleb_status`` / ``pleural_effusion_status``
+#: の label_map。
 THREE_VALUED = frozenset({PRESENT, ABSENT, UNKNOWN})
 #: ``pneumothorax_side`` に入れてよい値。患者から見た解剖学的左右。
 SIDES = frozenset({"left", "right", "bilateral"})
@@ -66,7 +68,7 @@ def check_sample(sample_id: str, sample: Mapping[str, Any]) -> list[InvariantVio
     def violate(rule: str, detail: str) -> None:
         found.append(InvariantViolation(sample_id, rule, detail))
 
-    for key in (STATUS_KEY, BULLA_KEY):
+    for key in (STATUS_KEY, BULLA_KEY, PLEURAL_KEY):
         if key in sample and sample[key] not in THREE_VALUED:
             violate("label_map 外の値", f"{key}={sample[key]!r}")
 

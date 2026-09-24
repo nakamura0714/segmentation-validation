@@ -30,6 +30,7 @@ STRUCTURE = {
     "abnormal_finding_status": {"type": "str"},
     "pneumothorax_side": {"type": "str"},
     "bulla_bleb_status": {"type": "str"},
+    "pleural_effusion_status": {"type": "str"},
     "pneumothorax_mask": {"type": "Mask2D"},
     "pneumothorax_area_pix2": {"type": "int"},
 }
@@ -67,6 +68,7 @@ def make_sample(
     status: str = "unknown",
     side: str | None = None,
     bulla: str = "unknown",
+    effusion: str = "unknown",
     mask: str | None = None,
     area: int | None = None,
     image: str = "images/a.png",
@@ -80,6 +82,7 @@ def make_sample(
         "abnormal_finding_status": status,
         "pneumothorax_side": side,
         "bulla_bleb_status": bulla,
+        "pleural_effusion_status": effusion,
         "pneumothorax_mask": {"pixel_array": mask},
         "pneumothorax_area_pix2": area,
     }
@@ -234,6 +237,39 @@ def test_bulla_blebはunknownからだけ上がる(tmp_path):
     samples = json.loads(options.out_path.read_text(encoding="utf-8"))["samples"]
     assert samples["a"]["bulla_bleb_status"] == "present"
     assert samples["b"]["bulla_bleb_status"] == "present"
+
+
+def test_胸水はunknownからだけ上がる(tmp_path):
+    """動かせるのは unknown からの1方向だけ（テンプレート 2026-09-24 追加）。
+
+    ``c`` は primary の明示正常由来の ``absent``。secondary（レポート）は
+    ``present`` しか主張できないが、確定した陰性なので維持する。
+    """
+    report, options = run(
+        tmp_path,
+        {
+            "a": make_sample(effusion="unknown"),
+            "b": make_sample(effusion="present"),
+            "c": make_sample(effusion="absent"),
+        },
+        {
+            "a": make_sample(effusion="present"),
+            "b": make_sample(effusion="absent"),
+            "c": make_sample(effusion="present"),
+        },
+    )
+    samples = json.loads(options.out_path.read_text(encoding="utf-8"))["samples"]
+    assert samples["a"]["pleural_effusion_status"] == "present"
+    assert samples["b"]["pleural_effusion_status"] == "present"
+    assert samples["c"]["pleural_effusion_status"] == "absent"
+
+    # 維持した側の根拠で理由を分ける（症例IDは Resolution が持つ）。
+    reasons = {
+        r.sample_id: [c for c in r.conflicts if "pleural_effusion_status" in c]
+        for r in report.resolutions
+    }
+    assert "never_downgrade" in reasons["b"][0]
+    assert "explicit_negative_wins" in reasons["c"][0]
 
 
 def test_abnormal_finding_statusは統合で変えない(tmp_path):
@@ -472,3 +508,37 @@ def test_secondaryにcase_evidenceが無くても止まらない(tmp_path):
         )
     )
     assert report.enriched == 1
+
+
+# ------------------------------------------------- image_file の実在チェック
+
+
+def test_参照先が実在しないimage_fileを数える(tmp_path):
+    """``--image-mode planned`` の入力が混ざると学習に使えない成果物になる。
+
+    成果物を見ただけで気づけるよう summary に出す。
+    """
+    real = tmp_path / "real.png"
+    real.write_bytes(b"x")
+    report, _ = run(
+        tmp_path,
+        {"a": make_sample(image=str(real))},
+        {"b": make_sample(image=str(tmp_path / "missing.png"))},
+    )
+    assert report.missing_image_files == 1
+    summary = report.artifacts["summary"].read_text(encoding="utf-8")
+    assert "学習に使えない" in summary
+
+
+def test_全て実在するなら0件になる(tmp_path):
+    real = tmp_path / "real.png"
+    real.write_bytes(b"x")
+    report, _ = run(
+        tmp_path,
+        {"a": make_sample(image=str(real))},
+        {"b": make_sample(image=str(real))},
+    )
+    assert report.missing_image_files == 0
+    assert "学習に使えない" not in report.artifacts["summary"].read_text(
+        encoding="utf-8"
+    )

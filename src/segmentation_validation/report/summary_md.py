@@ -273,7 +273,11 @@ def write_selection_summary(
     """採否の要約。Development JSON を作ってよいかの判定を必ず出す。
 
     ``merged`` は統合JSON（学習パイプライン入力）の情報
-    ``{"path", "totals", "conflicts"}``。属性の食い違いはここで毎回可視化する
+    ``{"path", "totals", "conflicts"}``。``build_development_manifest`` を
+    通した場合は ``{"patients", "studies", "by_dataset", "manifest_path"}``、
+    剪定した場合は ``{"pruned"}`` も入り、
+    「何が入っているか」のデータセット別内訳が付く（無ければ従来どおりの出力）。
+    属性の食い違いはここで毎回可視化する
     —— 元データ側の不整合なのでツールが解決できず、データ管理側へ報告し続ける
     必要があるため。
     """
@@ -519,6 +523,8 @@ def _add_merged_section(add: Any, merged: dict[str, Any]) -> None:
     add("## 統合JSON（学習パイプライン入力）")
     add("")
     add(f"- 出力: `{merged.get('path')}`")
+    # ★この行は ``totals``（統合JSONの構造上の数）だけで組む。患者数は画像を
+    # 持つものしか数えられず基準が違うので、混ぜずに下の表の合計行へ回す。
     add(
         f"- 規模: データセット {totals.get('datasets')} / 施設 "
         f"{totals.get('institutions')} / study {totals.get('studies')} / series "
@@ -529,6 +535,20 @@ def _add_merged_section(add: Any, merged: dict[str, Any]) -> None:
         "- 由来データセットは各 file entry の `dataset_id` で追える"
         "（train/test の別を失わないため）"
     )
+    pruned = merged.get("pruned")
+    if pruned is not None:
+        note = ""
+        if pruned.get("studies_with_case_labels"):
+            note = (
+                "。うち study レベルの分類ラベルを持っていた study "
+                f"{pruned['studies_with_case_labels']} 件"
+            )
+        add(
+            "- 画像を1枚も持たない series / study / institution は含まない"
+            f"（剪定: series {pruned.get('series')} / study {pruned.get('studies')}"
+            f" / 施設 {pruned.get('institutions')}{note}）。"
+            "剪定は画像と annotation を1件も動かさない"
+        )
     add("")
     add(
         "annotation 総数は各 development.json の keep 合計と一致する。"
@@ -536,6 +556,9 @@ def _add_merged_section(add: Any, merged: dict[str, Any]) -> None:
         "統合時に skip した分（`image_duplicates.csv` 参照）。"
     )
     add("")
+
+    if merged.get("by_dataset"):
+        _add_merged_breakdown(add, merged, totals)
 
     if not conflicts:
         add("元データ間の属性の食い違い: **なし**")
@@ -563,6 +586,89 @@ def _add_merged_section(add: Any, merged: dict[str, Any]) -> None:
             f"`{conflict.get('field')}` | {values} | `{conflict.get('adopted')}` |"
         )
     add("")
+
+
+#: 「主な病変クラス」に並べる件数。全クラス×データセットの行列は横に伸びて
+#: 読めないので、上位だけ出して残りは明細CSVへ誘導する。
+TOP_CLASSES = 3
+
+
+def _add_merged_breakdown(
+    add: Any, merged: dict[str, Any], totals: dict[str, Any]
+) -> None:
+    """「何が入っているか」のデータセット別内訳。
+
+    ``merged["by_dataset"]`` は ``build_development_manifest`` の戻り値。
+    ここでは既に畳まれた件数しか見ない（report 層が元JSONの階層構造を
+    知らずに済むよう、集合の畳み込みは selection 側で終えてある）。
+    """
+    by_dataset = merged["by_dataset"]
+
+    add("### 何が入っているか（データセット別）")
+    add("")
+    add(
+        "| dataset_id | 元JSON | 施設 | 患者 | study | 画像 | annotation |"
+        " うち0件の画像 | 主な病変クラス |"
+    )
+    add("|---|---|---|---|---|---|---|---|---|")
+    for dataset_id in sorted(by_dataset):
+        entry = by_dataset[dataset_id]
+        add(
+            f"| {dataset_id} | `{entry.get('source_json')}` | "
+            f"{entry.get('institutions')} | {entry.get('patients')} | "
+            f"{entry.get('studies')} | {entry.get('files')} | "
+            f"{entry.get('annotations')} | "
+            f"{entry.get('files_without_annotations')} | "
+            f"{_top_classes(entry.get('classes') or {})} |"
+        )
+    patients = merged.get("patients")
+    studies = merged.get("studies")
+    add(
+        "| **合計（重複を畳んだ実数）** | — | "
+        f"**{totals.get('institutions')}** | "
+        f"**{patients if patients is not None else '—'}** | "
+        f"**{studies if studies is not None else totals.get('studies')}** | "
+        f"**{totals.get('files')}** | "
+        f"**{totals.get('annotations')}** | — | — |"
+    )
+    add("")
+    add(
+        "- 画像と annotation の列は**足し上げると合計と一致する**"
+        "（1画像は必ず1データセットに属する）。"
+    )
+    add(
+        "- 施設 / 患者 / study の列は**足し上げても合計と一致しない**。"
+        "同じ患者・study が複数データセットに跨って登場するため。"
+        "各行は「そのデータセット由来の画像を1枚以上含む患者/study の数」。"
+    )
+    if studies is not None and studies != totals.get("studies"):
+        # 画像0枚の器は剪定してあるので、本来ここは一致する。出たら実装を疑う。
+        add(
+            f"- ⚠ 規模行の study {totals.get('studies')} と合計行の study {studies} が"
+            f"食い違っている（差 {totals.get('studies', 0) - studies} 件）。"
+            "画像を1枚も持たない study は剪定しているので一致するはず。"
+            "剪定が効いていない可能性があるので実装を疑うこと。"
+        )
+    manifest_path = merged.get("manifest_path")
+    if manifest_path:
+        add(
+            f"- 症例IDレベルの明細は `{Path(manifest_path).name}`（1画像=1行）。"
+            "`file_uid` は `image_decisions.csv` / `image_duplicates.csv` と"
+            "同じキーなので、そのまま突合できる。"
+            "病変クラス × データセットの全行列が要るときは、この明細を"
+            "`dataset_id` × `lesion_classes` で集計する。"
+        )
+    add("")
+
+
+def _top_classes(classes: dict[str, int]) -> str:
+    """件数降順の上位クラス。``classes`` は selection 側で整列済み。"""
+    if not classes:
+        return "—"
+    items = list(classes.items())
+    shown = " / ".join(f"{code} {count}" for code, count in items[:TOP_CLASSES])
+    rest = len(items) - TOP_CLASSES
+    return shown + (f" / 他 {rest} 種" if rest > 0 else "")
 
 
 # ------------------------------------------------------------------ helpers

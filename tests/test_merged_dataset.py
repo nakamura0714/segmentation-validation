@@ -38,12 +38,16 @@ def write_source(
     tree: dict,
     version_id: str = "2.2",
     version_date: str = "2026-05-19",
+    labels: dict[str, list[str]] | None = None,
 ) -> Path:
     """engineer-set 形式の最小の元JSONを書く。
 
     ``tree`` は ``{institution: {study: {series: {file: [geometry_uid, ...]}}}}``。
     ファイル名は実データと同じ ``engineer-set-<id>-<日時>.json`` にする
     （``dataset_id_for`` が日時を落とすことに依存しているため）。
+
+    ``labels`` は ``geometry_uid -> ["Findings/010", ...]``。指定の無い uid には
+    ``labels`` キーを**付けない**（実データにもラベル無しの annotation がある）。
     """
     dataset: dict = {}
     for institution, studies in tree.items():
@@ -62,8 +66,7 @@ def write_source(
                             file_key: {
                                 "image_path": f"medical2/synth/{file_key}.dcm",
                                 "annotations": [
-                                    {"geometry_uid": uid, "annotation_type": "brush"}
-                                    for uid in uids
+                                    _annotation(uid, labels) for uid in uids
                                 ],
                             }
                             for file_key, uids in files.items()
@@ -86,6 +89,24 @@ def write_source(
         encoding="utf-8",
     )
     return path
+
+
+def _annotation(uid: str, labels: dict[str, list[str]] | None) -> dict:
+    record: dict = {"geometry_uid": uid, "annotation_type": "brush"}
+    qualified = (labels or {}).get(uid)
+    if qualified:
+        record["labels"] = [
+            {
+                "label_id": 1,
+                "code_system": code.split("/")[0],
+                "code": code.split("/")[1],
+                "code_text": code,
+                "code_text_eng": code,
+                "confidence": 90.0,
+            }
+            for code in qualified
+        ]
+    return record
 
 
 def merge_all(
@@ -362,3 +383,208 @@ def test_書き出したJSONを読み戻せる(tmp_path: Path, config: Config) -
     )
     out = bd.write_merged_json(payload, tmp_path / "development_merged.json")
     assert json.loads(out.read_text(encoding="utf-8")) == payload
+
+
+# ------------------------------------------------------- 中身の明細と内訳
+
+
+def manifest_of(payload: dict, collect: bool = True) -> tuple[dict, list[dict]]:
+    """``build_development_manifest`` を per_dataset 付きで呼ぶ。
+
+    ``per_dataset`` は ``finalize_merged`` が ``meta_development.datasets`` に
+    そのまま入れているので、そこから取れる（``merge_all`` の戻り値を変えない）。
+    """
+    rows: list[dict] = []
+    summary = bd.build_development_manifest(
+        payload,
+        payload["meta_development"]["datasets"],
+        rows.append if collect else None,
+    )
+    return summary, rows
+
+
+def test_明細の行数が統合JSONの画像数と一致する(tmp_path: Path, config: Config) -> None:
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [
+            (DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1"], "F2": ["u2"]}}}}),
+            (DS_B, {"inst_b": {"ST2": {"SE2": {"F3": ["u3"]}}}}),
+        ],
+    )
+    _, rows = manifest_of(payload)
+    assert len(rows) == payload["meta_development"]["totals"]["files"] == 3
+    assert set(rows[0]) == set(bd.DEVELOPMENT_MANIFEST_COLUMNS)
+
+
+def test_明細行のfile_uidがimage_decisionsと同じ書式になる(
+    tmp_path: Path, config: Config
+) -> None:
+    """突合できることが明細CSVの価値の中心。書式をここで固定する。"""
+    payload, _ = merge_all(
+        tmp_path, config, [(DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1"]}}}})]
+    )
+    source_json = payload["meta_development"]["datasets"][DS_A]["source_json"]
+    _, rows = manifest_of(payload)
+    assert rows[0]["file_uid"] == f"{source_json}::{INSTITUTION}/ST1/SE1/F1"
+    assert rows[0]["dataset_id"] == DS_A
+    assert rows[0]["patient_id"] == "ST1"
+    assert rows[0]["image_path"] == "medical2/synth/F1.dcm"
+
+
+def test_病変クラスが列挙される(tmp_path: Path, config: Config) -> None:
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [(DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1", "u2"], "F2": ["u3"]}}}})],
+        labels={"u1": ["Findings/001"], "u2": ["Findings/010", "Findings/001"]},
+    )
+    summary, rows = manifest_of(payload)
+    by_file = {row["file_id"]: row for row in rows}
+    assert by_file["F1"]["lesion_classes"] == "Findings/001|Findings/010"
+    # ラベルの無い annotation は空欄。「不明」と書いて水増ししない。
+    assert by_file["F2"]["lesion_classes"] == ""
+    # 件数降順→コード昇順。u1 と u2 が Findings/001、u2 だけが Findings/010。
+    assert summary["datasets"][DS_A]["classes"] == {
+        "Findings/001": 2,
+        "Findings/010": 1,
+    }
+
+
+def test_annotationが0件の画像も明細に出る(tmp_path: Path, config: Config) -> None:
+    """除外の結果0件になった画像を明細から消すと、母集団が黙って変わる。"""
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [(DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": [], "F2": ["u1"]}}}})],
+    )
+    summary, rows = manifest_of(payload)
+    empty = next(row for row in rows if row["file_id"] == "F1")
+    assert empty["n_annotations"] == 0
+    assert empty["lesion_classes"] == ""
+    assert summary["datasets"][DS_A]["files"] == 2
+    assert summary["datasets"][DS_A]["files_without_annotations"] == 1
+
+
+def test_データセット別の画像とannotationの合計が統合totalsと一致する(
+    tmp_path: Path, config: Config
+) -> None:
+    """1画像は必ず1データセットに属するので、この2列だけは総和が合う。"""
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [
+            (DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1", "u2"]}}}}),
+            (DS_B, {"inst_b": {"ST2": {"SE2": {"F2": ["u3"]}}}}),
+        ],
+    )
+    summary, _ = manifest_of(payload)
+    totals = payload["meta_development"]["totals"]
+    datasets = summary["datasets"].values()
+    assert sum(entry["files"] for entry in datasets) == totals["files"]
+    assert sum(entry["annotations"] for entry in datasets) == totals["annotations"]
+
+
+def test_内訳のannotation数がmeta_developmentのkeptと一致する(
+    tmp_path: Path, config: Config
+) -> None:
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [
+            (DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1", "u2"]}}}}),
+            (DS_B, {"inst_b": {"ST2": {"SE2": {"F2": ["u3"]}}}}),
+        ],
+    )
+    summary, _ = manifest_of(payload)
+    meta = payload["meta_development"]["datasets"]
+    for dataset_id, entry in summary["datasets"].items():
+        assert entry["annotations"] == meta[dataset_id]["kept"]
+
+
+def test_同じstudyを跨ぐと患者とstudyは両データセットで数える(
+    tmp_path: Path, config: Config
+) -> None:
+    """二重計上は**仕様**。各行は「そのデータセット由来の画像を含む数」。"""
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [
+            (DS_A, {INSTITUTION: {"ST1": {"SE1": {"F_000": ["u1"]}}}}),
+            (DS_B, {INSTITUTION: {"ST1": {"SE1": {"F_002": ["u2"]}}}}),
+        ],
+    )
+    summary, _ = manifest_of(payload)
+    assert summary["datasets"][DS_A]["studies"] == 1
+    assert summary["datasets"][DS_B]["studies"] == 1
+    assert summary["datasets"][DS_A]["patients"] == 1
+    assert summary["datasets"][DS_B]["patients"] == 1
+    # 合計は畳んだ実数なので1。総和（2）とは一致しない。
+    assert payload["meta_development"]["totals"]["studies"] == 1
+    assert summary["patients"] == 1
+    assert summary["studies"] == 1
+
+
+def test_画像を1枚も持たないstudyは合計に数えない(
+    tmp_path: Path, config: Config
+) -> None:
+    """合計を「全study」で数えると、**合計 < 各行の総和**という読めない表になる。
+
+    実データの統合JSONには画像を1枚も持たない study が170件ある（空の
+    ``file_list`` は共有 series でありふれた形）。データセット別の行は file entry
+    からしか数えられないので、合計も同じ基準に揃える。
+    """
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [
+            (
+                DS_A,
+                {
+                    INSTITUTION: {
+                        "ST1": {"SE1": {"F1": ["u1"]}},
+                        "ST2": {"SE2": {}},  # 画像を1枚も持たない
+                    }
+                },
+            )
+        ],
+    )
+    summary, rows = manifest_of(payload)
+    # 構造上の study 数は2だが、画像を持つのは1つだけ。
+    assert payload["meta_development"]["totals"]["studies"] == 2
+    assert summary["studies"] == 1
+    assert summary["patients"] == 1
+    assert summary["studies"] >= summary["datasets"][DS_A]["studies"]
+    assert {row["study_key"] for row in rows} == {"ST1"}
+
+
+def test_row_sinkを渡さなくても集計だけ取れる(tmp_path: Path, config: Config) -> None:
+    payload, _ = merge_all(
+        tmp_path, config, [(DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1"]}}}})]
+    )
+    summary, rows = manifest_of(payload, collect=False)
+    assert rows == []
+    assert summary["datasets"][DS_A]["files"] == 1
+
+
+def test_明細CSVのヘッダが列定数と一致する(tmp_path: Path, config: Config) -> None:
+    """CLI側の書き出し。列定数とCSVがずれると突合スクリプトが黙って壊れる。"""
+    import csv
+
+    from segmentation_validation.cli import _write_development_manifest
+
+    payload, _ = merge_all(
+        tmp_path,
+        config,
+        [(DS_A, {INSTITUTION: {"ST1": {"SE1": {"F1": ["u1"], "F2": []}}}})],
+    )
+    out = tmp_path / "development_manifest.csv"
+    summary = _write_development_manifest(
+        out, payload, payload["meta_development"]["datasets"]
+    )
+    with out.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert tuple(reader.fieldnames or ()) == bd.DEVELOPMENT_MANIFEST_COLUMNS
+        rows = list(reader)
+    assert len(rows) == payload["meta_development"]["totals"]["files"] == 2
+    assert summary["datasets"][DS_A]["files"] == 2

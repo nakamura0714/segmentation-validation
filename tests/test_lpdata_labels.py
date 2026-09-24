@@ -26,6 +26,16 @@ BULLA = Label(
     confidence=None,
     label_id=14,
 )
+#: 胸水。``code_text`` は塗りつぶし / 矩形 / 縁取りの3通りあるが
+#: ``code_text_eng`` はこの1語に揃っている。
+PLEURAL_EFFUSION = Label(
+    code_system="Findings",
+    code="007",
+    code_text="胸水(塗りつぶし）",
+    code_text_eng="pleural_effusion",
+    confidence=None,
+    label_id=7,
+)
 #: 明示の正常。``normal_evidence`` の既定に一致する唯一のラベル。
 NO_FINDINGS_NORMAL = Label(
     code_system="No Findings",
@@ -241,6 +251,59 @@ def test_bulla_blebはpresentかunknownだけでabsentを出さない():
     assert (
         labels_of((), case_labels=(NO_FINDINGS_NORMAL,)).bulla_bleb_status == "unknown"
     )
+
+
+def test_胸水は3値すべてを出す():
+    """**ブラ / ブレブとは規則が違う。** 明示正常のときだけ ``absent`` を出す。
+
+    テンプレートが ``pleural_effusion_status`` を足した 2026-09-24 の変更に対応する。
+    """
+    assert labels_of(with_labels(PLEURAL_EFFUSION)).pleural_effusion_status == "present"
+    # 明示の正常（``No Findings/normal``）は「胸水も無い」と言い切れる唯一の根拠。
+    assert (
+        labels_of((), case_labels=(NO_FINDINGS_NORMAL,)).pleural_effusion_status
+        == "absent"
+    )
+
+
+def test_胸水はアノテーションが無いだけでabsentにしない():
+    """未アノテーションと陰性は別物。ここを崩すと未アノテーションを陰性の教師信号にする。"""
+    # 他の所見だけが付いている（胸水は付けていないだけ）。
+    assert labels_of(with_labels(NODULE)).pleural_effusion_status == "unknown"
+    # annotation が1件も無い。
+    assert labels_of().pleural_effusion_status == "unknown"
+
+
+def test_正常ラベルと所見が同居したらabsentにしない():
+    """実データに 166 枚ある矛盾。**「所見あり」と「胸水は無い」を同時に言わない。**
+
+    正常ラベルだけを条件にすると、結節を付けた画像まで「胸水は無い」と
+    言い切ってしまう。`abnormal_finding_status` は同じ材料から `present` に
+    倒れる（所見が勝つ）ので、胸水も陰性とは言い切らず `unknown` に留める。
+    """
+    result = labels_of(with_labels(NODULE), case_labels=(NO_FINDINGS_NORMAL,))
+
+    assert result.abnormal_finding_status == "present"
+    assert result.pleural_effusion_status == "unknown"
+
+    # 胸水そのものが付いていれば、正常ラベルと同居していても present（実データ3枚）。
+    both = labels_of(with_labels(PLEURAL_EFFUSION), case_labels=(NO_FINDINGS_NORMAL,))
+    assert both.pleural_effusion_status == "present"
+
+
+def test_胸水は気胸ラベルと独立している():
+    """胸水は気胸の偽陽性要因。両方立つ（水気胸など）のも片方だけも正当。"""
+    both = labels_of(with_labels(PNEUMOTHORAX, PLEURAL_EFFUSION))
+    assert both.pneumothorax_case is True
+    assert both.pleural_effusion_status == "present"
+
+    effusion_only = labels_of(with_labels(PLEURAL_EFFUSION))
+    assert effusion_only.pneumothorax_case is False
+    assert effusion_only.pleural_effusion_status == "present"
+
+    # 気胸だけのサンプルに胸水フラグを立てない（根拠が無い）。
+    pneumothorax_only = labels_of(with_labels(PNEUMOTHORAX))
+    assert pneumothorax_only.pleural_effusion_status == "unknown"
 
 
 def test_pneumothorax_sideは常にnull():

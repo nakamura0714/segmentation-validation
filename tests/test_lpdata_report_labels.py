@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from conftest import (
     NODULE,
@@ -41,6 +43,15 @@ BULLA_BLEB = Label(
     code_text_eng="bulla_bleb",
     confidence=None,
     label_id=8,
+)
+#: 胸水。
+PLEURAL_EFFUSION = Label(
+    code_system="Findings",
+    code="007",
+    code_text="胸水(塗りつぶし）",
+    code_text_eng="pleural_effusion",
+    confidence=None,
+    label_id=7,
 )
 
 
@@ -257,6 +268,98 @@ def test_bulla_blebをpresentからabsentへ落とさない():
     assert [c.reason for c in result.conflicts] == ["never_downgrade"]
 
 
+# --------------------------------------------------- pleural_effusion_status
+
+
+def test_胸水はunknownからだけ上げる():
+    result = enrich_labels(
+        base_labels(), make_report_labels(status=PRESENT, effusion=PRESENT)
+    )
+    assert result.labels.pleural_effusion_status == PRESENT
+    assert "pleural_effusion_status" in [c.field for c in result.changes]
+
+
+def test_胸水をpresentからabsentへ落とさない():
+    base = base_labels(records=(make_record("A", labels=(PLEURAL_EFFUSION,)),))
+    assert base.pleural_effusion_status == PRESENT
+
+    result = enrich_labels(base, make_report_labels(status=UNKNOWN, effusion=ABSENT))
+
+    assert result.labels.pleural_effusion_status == PRESENT
+    assert [c.field for c in result.conflicts] == ["pleural_effusion_status"]
+    assert [c.reason for c in result.conflicts] == ["never_downgrade"]
+
+
+def test_明示正常のabsentはレポートのpresentより優先する():
+    """``No Findings/normal`` は確認済みの陰性。レポートで覆さず裁定に残す。
+
+    ``pneumothorax_case`` の ``explicit_negative_wins`` と同じ語彙にそろえてある。
+    """
+    base = base_labels(case_labels=(NORMAL,))
+    assert base.pleural_effusion_status == ABSENT
+
+    result = enrich_labels(base, make_report_labels(status=UNKNOWN, effusion=PRESENT))
+
+    assert result.labels.pleural_effusion_status == ABSENT
+    conflict = result.conflicts[0]
+    assert conflict.field == "pleural_effusion_status"
+    # 両方の根拠が残ること（片方だけだと後から突き合わせられない）。
+    assert (conflict.annotation, conflict.report) == (ABSENT, PRESENT)
+    assert conflict.kept == ABSENT
+    assert conflict.reason == "explicit_negative_wins"
+
+
+def test_水気胸は胸水フラグを立てない():
+    """気胸には含めるが、胸水フラグは根拠を見て独立に判定する。
+
+    上流は水気胸を ``pneumothorax_subtype`` で返し、胸水の観測リストには載せない。
+    """
+    report = replace(
+        make_report_labels(status=PRESENT, effusion=UNKNOWN),
+        pneumothorax_subtype="hydropneumothorax",
+    )
+    result = enrich_labels(base_labels(), report)
+
+    assert result.labels.pneumothorax_case is True
+    assert result.labels.pleural_effusion_status == UNKNOWN
+
+
+def test_胸水はレポートが黙っていれば動かない():
+    base = base_labels()
+    assert base.pleural_effusion_status == UNKNOWN
+
+    result = enrich_labels(base, make_report_labels(status=PRESENT, effusion=UNKNOWN))
+
+    assert result.labels.pleural_effusion_status == UNKNOWN
+
+
+# --------------------------------------------------------------- 水気胸
+
+
+def test_水気胸は気胸に含める():
+    """上流は水気胸を ``status: present`` + ``subtype: hydropneumothorax`` で返す。
+
+    このモジュールは subtype を見ないので、そのまま気胸症例になる
+    （2026-09-24 に確定した方針。除外したくなったら分析用CSVの subtype で引く）。
+    """
+    report = replace(
+        make_report_labels(status=PRESENT),
+        pneumothorax_subtype="hydropneumothorax",
+    )
+    result = enrich_labels(base_labels(), report)
+
+    assert result.labels.pneumothorax_case is True
+    assert result.labels.case_evidence is CaseEvidence.REPORT_POSITIVE
+
+
+def test_水気胸でもin_scopeはstatusだけで決まる():
+    report = replace(
+        make_report_labels(status=PRESENT),
+        pneumothorax_subtype="hydropneumothorax",
+    )
+    assert in_scope(report, ("present", "absent"))
+
+
 # -------------------------------------------------- abnormal_finding_status
 
 
@@ -309,6 +412,7 @@ def test_補強後も不変条件を満たす():
     sample = {
         "abnormal_finding_status": result.labels.abnormal_finding_status,
         "bulla_bleb_status": result.labels.bulla_bleb_status,
+        "pleural_effusion_status": result.labels.pleural_effusion_status,
         "pneumothorax_case": result.labels.pneumothorax_case,
         "pneumothorax_side": result.labels.pneumothorax_side,
     }

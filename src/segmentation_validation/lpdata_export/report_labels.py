@@ -42,8 +42,16 @@
 
 **このモジュールは ``ReportLabels`` の ``*_certainty_*`` を一切参照しない。**
 参照しているのは ``pneumothorax_status`` / ``pneumothorax_side`` /
-``bulla_bleb_status`` / ``observed_finding_count`` / ``has_report`` の5つだけ。
-certainty の保持は ``report.py`` の分析用CSVの仕事。
+``bulla_bleb_status`` / ``pleural_effusion_status`` / ``observed_finding_count`` /
+``has_report`` の6つだけ。certainty の保持は ``report.py`` の分析用CSVの仕事。
+
+## 水気胸は気胸に含む（2026-09-24 確定）
+
+上流は水気胸を ``pneumothorax_status: present`` +
+``pneumothorax_subtype: hydropneumothorax`` として返す。このモジュールは
+``pneumothorax_status`` しか見ないので、**水気胸はそのまま
+``pneumothorax_case: true`` になる**。subtype による除外はしない。
+分けたくなったら subtype は分析用CSVに残っているのでそこから引ける。
 """
 
 from __future__ import annotations
@@ -149,6 +157,17 @@ def in_scope(
 
 
 # ------------------------------------------------------------------- 補強本体
+
+
+def _effusion_conflict_reason(kept: str) -> str:
+    """``pleural_effusion_status`` の食い違いの理由。**維持した側の根拠で決まる。**
+
+    ``pneumothorax_case`` の裁定（``_enrich_case``）と同じ語彙にそろえる。
+
+    - ``absent`` を維持した → ``normal_evidence`` の明示正常がレポートに勝った
+    - ``present`` を維持した → 下げる方向には動かさない
+    """
+    return "explicit_negative_wins" if kept == ABSENT else "never_downgrade"
 
 
 def _enrich_case(
@@ -269,10 +288,39 @@ def enrich_labels(base: SampleLabels, report: ReportLabels | None) -> EnrichResu
                 )
             )
 
+    # --- pleural_effusion_status ---
+    # **レポートが作れるのは present だけ。** 上流は観測リストに胸水が出たかどうかしか
+    # 返さない（``ReportLabels`` の docstring）ので、ここから ``absent`` は生まれない。
+    # ``absent`` は annotation の明示正常だけが根拠（``build_labels``）。
+    # 動かせるのは unknown からの1方向だけ。確定した値は present / absent とも維持する。
+    effusion = report.pleural_effusion_status
+    if effusion in (PRESENT, ABSENT):
+        if labels.pleural_effusion_status == UNKNOWN:
+            changes.append(
+                LabelChange(
+                    "pleural_effusion_status",
+                    UNKNOWN,
+                    effusion,
+                    "report_pleural_effusion",
+                )
+            )
+            labels = replace(labels, pleural_effusion_status=effusion)
+        elif labels.pleural_effusion_status != effusion:
+            conflicts.append(
+                LabelConflict(
+                    "pleural_effusion_status",
+                    labels.pleural_effusion_status,
+                    effusion,
+                    labels.pleural_effusion_status,
+                    _effusion_conflict_reason(labels.pleural_effusion_status),
+                )
+            )
+
     # --- abnormal_finding_status は触らない ---
     # 上流が policy 未確定として常に unknown を返すので、写すと annotation 由来の
     # 判定（present / absent）を unknown で潰すことになる。
-    # finding_labels_observed からの導出もしない（語彙が統制されていない）。
+    # finding_labels_observed からの導出もしない（語彙が統制されていない。
+    # ただし胸水の1語だけは例外的に拾っている —— adapters.engineer_set 参照）。
 
     return EnrichResult(
         labels=labels, changes=tuple(changes), conflicts=tuple(conflicts)

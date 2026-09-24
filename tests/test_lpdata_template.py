@@ -120,3 +120,40 @@ def test_実テンプレートとビルダのキーが一致する():
         pytest.skip(f"テンプレートが無い: {path}")
 
     validate_coverage(load_template(path), set(FIELD_BUILDERS))
+
+
+# ------------------------------------------------------------ description
+
+
+def test_split前提の説明文はsplitに触れない文へ差し替える():
+    """本エクスポータは ``split`` を書かないので、テンプレートの
+
+    「（train split）」を引き継ぐと「split は無いのに train split と
+    書いてある」矛盾したファイルになる。
+    """
+    from segmentation_validation.lpdata_export.template import resolve_description
+
+    meta = {"description": "胸部X線 気胸 Segmentation 用データセット（train split）。"}
+    assert (
+        resolve_description(meta, None) == "胸部X線 気胸 Segmentation 用データセット。"
+    )
+
+
+def test_明示指定があればそれを使う():
+    from segmentation_validation.lpdata_export.template import resolve_description
+
+    meta = {"description": "胸部X線 気胸 Segmentation 用データセット（train split）。"}
+    assert resolve_description(meta, "自前の説明") == "自前の説明"
+
+
+def test_split前提でない説明文はそのまま引き継ぐ():
+    """テンプレート側が文言を変えたら勝手に書き換えない。"""
+    from segmentation_validation.lpdata_export.template import resolve_description
+
+    assert resolve_description({"description": "任意の説明"}, None) == "任意の説明"
+
+
+def test_descriptionが無ければNoneのまま():
+    from segmentation_validation.lpdata_export.template import resolve_description
+
+    assert resolve_description({}, None) is None

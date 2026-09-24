@@ -123,6 +123,10 @@ def _bulla_bleb_status(ctx: SampleContext) -> str:
     return ctx.labels.bulla_bleb_status
 
 
+def _pleural_effusion_status(ctx: SampleContext) -> str:
+    return ctx.labels.pleural_effusion_status
+
+
 # ------------------------------------------------------------------ マスク
 
 
@@ -167,6 +171,7 @@ FIELD_BUILDERS: dict[str, Callable[[SampleContext], Any]] = {
     "abnormal_finding_status": _abnormal_finding_status,
     "pneumothorax_side": _pneumothorax_side,
     "bulla_bleb_status": _bulla_bleb_status,
+    "pleural_effusion_status": _pleural_effusion_status,
     "pneumothorax_mask": _pneumothorax_mask,
     "lung_mask": _lung_mask,
     "thorax_mask": _thorax_mask,

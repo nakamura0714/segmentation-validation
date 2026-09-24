@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
   "meta": {
-    "generated_at": "2026-09-16T15:10:53.129040+00:00",
+    "generated_at": "2026-09-18T09:10:10.396666+00:00",
     "dataset_name": "pi6-validation",
     "n_annotations": 2426,
-    "n_images": 36
+    "n_images": 43
   },
   "decisions": [
     {
@@ -21865,6 +21865,16 @@
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "asahikawa/CXASW00001554_000/CXASW00001554_000_000/CXASW00001554_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
       "image_key": "asahikawa/CXASW00001554_000/CXASW00001554_000_000/CXASW00001554_000_000_001",
       "decision": "exclude",
       "reason": "",
@@ -21882,6 +21892,16 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::asahikawa/CXASW00001567_000/CXASW00001567_000_000/CXASW00001567_000_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "asahikawa/CXASW00001598_000/CXASW00001598_000_000/CXASW00001598_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
@@ -21912,6 +21932,16 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001288_000/LTNGF00001288_000_000/LTNGF00001288_000_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "nagoya_daiichi/LTNGF00001289_000/LTNGF00001289_000_000/LTNGF00001289_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
@@ -21962,6 +21992,16 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001293_000/LTNGF00001293_000_000/LTNGF00001293_000_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "nagoya_daiichi/LTNGF00001294_000/LTNGF00001294_000_000/LTNGF00001294_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
@@ -22022,6 +22062,16 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001300_000/LTNGF00001300_000_000/LTNGF00001300_000_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "nagoya_daiichi/LTNGF00001302_000/LTNGF00001302_000_000/LTNGF00001302_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
@@ -22135,6 +22185,16 @@
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "nagoya_daiichi/LTNGF00001323_000/LTNGF00001323_000_000/LTNGF00001323_000_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
       "image_key": "nagoya_daiichi/LTNGF00001323_000/LTNGF00001323_000_000/LTNGF00001323_000_000_002",
       "decision": "exclude",
       "reason": "",
@@ -22172,6 +22232,16 @@
       "reviewed_at": "",
       "comment": "",
       "legacy_file_uid": "engineer-set-ANN_EIRLPRJ_01272-20260709_004526.json::nagoya_daiichi/LTNGF00001328_000/LTNGF00001328_000_000/LTNGF00001328_000_000_001"
+    },
+    {
+      "dataset_id": "ANN_EIRLPRJ_01272",
+      "image_key": "okayama_chuo/CXOKC00001821_001/CXOKC00001821_001_000/CXOKC00001821_001_000_000",
+      "decision": "exclude",
+      "reason": "expiration_suspected",
+      "reviewer": "kosuke.nakamura@lpixel.net",
+      "reviewed_at": "2026-09-18T00:00:00+00:00",
+      "comment": "2026-09-18 目視判定: 呼気撮影の疑い。学習・評価の双方から除外（対象34件中のNG 7件）",
+      "legacy_file_uid": ""
     },
     {
       "dataset_id": "ANN_EIRLPRJ_01272",

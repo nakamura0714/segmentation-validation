@@ -146,3 +146,40 @@ def test_全サブコマンドにhandlerがある():
         if isinstance(action, argparse._SubParsersAction)
     ][0]
     assert set(subparsers.choices) == set(HANDLERS)
+
+
+def test_export_lpdata_ofcのmask_mode既定はplanned():
+    """OFC 側の価値はマスクではなく「マスクが無くても気胸症例と分かる」こと。
+
+    マスクを持つ画像は例外なく development 側にもあり、統合は重複時に必ず
+    primary（人手整備済みのGT）を採るので、OFC 段で書き出した PNG は
+    1枚も参照されない（実測273枚すべて未参照）。
+    """
+    from segmentation_validation.cli import build_parser
+
+    args = build_parser().parse_args(["export-lpdata-ofc", "--source", "ofc.json"])
+
+    assert args.mask_mode == "planned"
+
+
+def test_export_lpdataのmask_mode既定は変えていない():
+    """共有パーサ（``parents=``）を壊していないこと。
+
+    development 側は結合マスクの唯一の供給源なので既定を動かさない。
+    """
+    from segmentation_validation.cli import build_parser
+
+    args = build_parser().parse_args(["export-lpdata"])
+
+    assert args.mask_mode == "planned"
+
+
+def test_export_lpdata_ofcでもgenerateを明示できる():
+    """将来 OFC 単独の気胸マスクが増えたときに塞がない。"""
+    from segmentation_validation.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["export-lpdata-ofc", "--source", "ofc.json", "--mask-mode", "generate"]
+    )
+
+    assert args.mask_mode == "generate"

@@ -58,6 +58,10 @@ IMAGE_PATH_DEPTH = 8
 #: ofuna_chuo_report が名前空間キーとして足すもので、通常の engineer-set には無い。
 REPORT_LABELS_KEY = "report_labels"
 
+#: ``finding_labels_observed`` から唯一拾う所見名（胸水）。詳細は
+#: ``_report_labels`` の docstring。annotation 側の ``code_text_eng`` と同じ綴り。
+PLEURAL_EFFUSION_OBSERVED = "pleural_effusion"
+
 
 def dataset_id_for(path: Path) -> str:
     """JSONファイル名からデータセットIDを作る。
@@ -304,15 +308,27 @@ def _report_labels(study: dict[str, Any], study_key: str) -> ReportLabels | None
     いない）。陽性所見が0件かどうかだけを ``observed_finding_count`` に残す。
     「レポートは在るが陽性所見が1件も無い」は明示的な陰性根拠になるが、
     所見名そのものは判定にも出力にも使わないため。
+
+    唯一の例外が ``pleural_effusion``。上流に ``pleural_effusion_status`` に
+    あたるキーが無く、胸水の有無はこのリストにしか出ない。リストを下流へ渡さず、
+    **この1語が在るかどうかだけ**を ``pleural_effusion_status`` に畳んで持つ
+    （語彙が統制されていない問題は「1語を決め打ちで照合する」ことで回避する）。
+    観測リストに載るのは ``present: true`` の所見だけである（実レポート 80 件で
+    確認: 載っている 40 件は全て ``present: true``、載っていない 40 件は
+    finding 自体が無いか ``present: false`` のみ）。
     """
     raw = study.get(REPORT_LABELS_KEY)
     if not isinstance(raw, dict):
         return None
     observed = raw.get("finding_labels_observed")
+    observed_list = observed if isinstance(observed, list) else []
     return ReportLabels(
         pneumothorax_status=str(raw.get("pneumothorax_status") or "unknown"),
         pneumothorax_side=raw.get("pneumothorax_side"),
         bulla_bleb_status=str(raw.get("bulla_bleb_status") or "unknown"),
+        pleural_effusion_status=(
+            "present" if PLEURAL_EFFUSION_OBSERVED in observed_list else "unknown"
+        ),
         observed_finding_count=len(observed) if isinstance(observed, list) else 0,
         pneumothorax_subtype=raw.get("pneumothorax_subtype"),
         pneumothorax_evidence=raw.get("pneumothorax_evidence"),

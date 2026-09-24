@@ -75,6 +75,7 @@ PIXEL_FIELDS: tuple[str, ...] = (
 CASE_KEY = "pneumothorax_case"
 SIDE_KEY = "pneumothorax_side"
 BULLA_KEY = "bulla_bleb_status"
+PLEURAL_KEY = "pleural_effusion_status"
 STATUS_KEY = "abnormal_finding_status"
 MASK_KEY = "pneumothorax_mask"
 AREA_KEY = "pneumothorax_area_pix2"
@@ -95,6 +96,9 @@ class MergeOptions:
     dataset_name: str | None = None
     dataset_id: str | None = None
     owner: str | None = None
+    #: ``meta.description``。未指定なら primary の文言を引き継ぐが、
+    #: ``split`` 前提の文なら split に触れない文へ差し替える。
+    description: str | None = None
     #: True なら**データセットJSONを書かない**。裁定の要約と一覧だけ出す。
     dry_run: bool = False
     #: True なら重複時にラベル補強をせず primary をそのまま残す。
@@ -148,7 +152,12 @@ class MergeReport:
     case_counts_after: dict[str, int] = field(default_factory=dict)
     status_counts_after: dict[str, int] = field(default_factory=dict)
     side_counts_after: dict[str, int] = field(default_factory=dict)
+    effusion_counts_after: dict[str, int] = field(default_factory=dict)
     violations: list[str] = field(default_factory=list)
+    #: ``image_file`` の参照先が実在しないサンプル数。
+    #: **0 でなければ学習には使えない**（``--image-mode planned`` で作ると
+    #: 変換予定のパスだけが入るため）。成果物を見ただけで判断できるよう数える。
+    missing_image_files: int = 0
     artifacts: dict[str, Path] = field(default_factory=dict)
 
 
@@ -335,6 +344,29 @@ def enrich_sample(
                 )
             )
 
+    # --- pleural_effusion_status: unknown からだけ上げる ---
+    # secondary（読影レポート由来）が作れるのは present だけ。``absent`` は primary の
+    # 明示正常（``normal_evidence``）にしか出ない。
+    # **absent は維持して conflict に出す。**
+    effusion = secondary.get(PLEURAL_KEY)
+    if effusion in (PRESENT, ABSENT):
+        kept = primary.get(PLEURAL_KEY)
+        if kept == UNKNOWN:
+            merged[PLEURAL_KEY] = effusion
+            changes.append(
+                LabelChange(PLEURAL_KEY, UNKNOWN, effusion, "report_pleural_effusion")
+            )
+        elif kept != effusion:
+            conflicts.append(
+                LabelConflict(
+                    PLEURAL_KEY,
+                    kept,
+                    effusion,
+                    kept,
+                    "explicit_negative_wins" if kept == ABSENT else "never_downgrade",
+                )
+            )
+
     # --- abnormal_finding_status は触らない ---
     # secondary（読影レポート由来）は policy 未確定で常に unknown を返すので、
     # 写すと annotation 由来の present / absent を潰す。
@@ -506,7 +538,11 @@ def merge_lpdata(options: MergeOptions) -> MergeReport:
     report.side_counts_after = dict(
         Counter(str(s.get(SIDE_KEY)) for s in samples.values())
     )
+    report.effusion_counts_after = dict(
+        Counter(str(s.get(PLEURAL_KEY)) for s in samples.values())
+    )
     report.violations = [str(v) for v in check_samples(samples)]
+    report.missing_image_files = _count_missing_images(samples)
 
     # 裁定一覧と要約は dry-run でも必ず書く（統合前に人が確認するための材料）。
     report.artifacts["resolutions"] = _write_resolutions(options, report)
@@ -524,6 +560,21 @@ def merge_lpdata(options: MergeOptions) -> MergeReport:
     logger.info("統合 lp-data JSON -> %s (%d サンプル)", options.out_path, len(samples))
     report.artifacts["summary"] = _write_summary(options, report)
     return report
+
+
+def _count_missing_images(samples: Mapping[str, Mapping[str, Any]]) -> int:
+    """``image_file`` の参照先が実在しないサンプル数。
+
+    ``--image-mode planned`` で作った入力を統合すると、変換予定のパスだけが
+    入った「学習に使えない」データセットができる。**成果物を見ただけで
+    それが分かるように**数えて summary に出す。
+    """
+    missing = 0
+    for sample in samples.values():
+        path = sample.get("image_file")
+        if path and not Path(path).exists():
+            missing += 1
+    return missing
 
 
 def _case_counts(samples: Mapping[str, Mapping[str, Any]]) -> dict[str, int]:
@@ -545,7 +596,7 @@ def _build_meta(
     structure: Mapping[str, Any],
 ) -> dict[str, Any]:
     """統合後の ``meta``。primary を土台に provenance を差し替える。"""
-    from .template import unresolved_placeholders
+    from .template import resolve_description, unresolved_placeholders
 
     meta: dict[str, Any] = dict(primary["meta"])
     if options.dataset_name:
@@ -554,6 +605,9 @@ def _build_meta(
         meta["dataset_id"] = options.dataset_id
     if options.owner:
         meta["owner"] = options.owner
+    description = resolve_description(meta, options.description)
+    if description is not None:
+        meta["description"] = description
 
     meta["content_type"] = "dataset"
     meta["date"] = date.today().isoformat()
@@ -671,6 +725,19 @@ def build_summary(report: MergeReport) -> str:
         f"| **統合後のサンプル数** | **{report.merged_samples:,}** |",
         "",
     ]
+
+    if report.missing_image_files:
+        lines += [
+            f"> ⚠️ **`image_file` の参照先が実在しないサンプルが "
+            f"{report.missing_image_files:,} 件ある。**",
+            "> `--image-mode planned` で作った入力が混ざっている"
+            "（変換予定のパスだけが入っている）。",
+            "> **この状態では学習に使えない。** "
+            "`export-lpdata` / `export-lpdata-ofc` を",
+            "> `--image-mode convert` で実行して DICOM を 16bit PNG へ変換し、"
+            "統合し直すこと。",
+            "",
+        ]
 
     lines += _changes_section(report)
     lines += _conflict_section(report)
@@ -804,6 +871,26 @@ def _distribution_section(report: MergeReport) -> list[str]:
         for key in sorted(report.side_counts_after):
             lines.append(f"| {key} | {report.side_counts_after[key]:,} |")
         lines.append("")
+
+    if report.effusion_counts_after:
+        lines += [
+            "`pleural_effusion_status`（統合後）:",
+            "",
+            "| 値 | 件数 |",
+            "| --- | ---: |",
+        ]
+        for key in sorted(report.effusion_counts_after):
+            lines.append(f"| {key} | {report.effusion_counts_after[key]:,} |")
+        lines += [
+            "",
+            "> `absent` の根拠は annotation の明示正常（`No Findings/normal`）"
+            "**だけ**。secondary（読影レポート由来）は `present` しか上げない ——"
+            "観測リストに載らない理由が「記載なし」と「明示的に陰性」の両方を含み、"
+            "区別できないため。primary が `absent` のサンプルに secondary が"
+            "`present` を主張した場合は、`absent` を維持して裁定一覧"
+            "（`explicit_negative_wins`）に出している。",
+            "",
+        ]
     return lines
 
 

@@ -600,6 +600,67 @@ def test_report_labelsがFileGroupまで運ばれる(tmp_path: Path):
     assert groups["F2"].report_labels is None
 
 
+def test_胸水はfinding_labels_observedの1語から立てる(tmp_path: Path):
+    """上流に ``pleural_effusion_status`` が無いので観測リストの1語だけを畳む。
+
+    リスト全体は下流へ渡さない（語彙が統制されていない）。
+    """
+    from segmentation_validation.adapters.engineer_set import EngineerSetAdapter
+
+    path = make_report_merged(
+        tmp_path,
+        {
+            "ST1": report_labels("present", observed=["pleural_effusion", "scar"]),
+            "ST2": report_labels("present", observed=["scar"]),
+        },
+    )
+    groups = {g.file: g for g in EngineerSetAdapter(path, Config()).iter_files()}
+
+    assert groups["F1"].report_labels.pleural_effusion_status == "present"
+    # 載っていないのは「記載なし」と「明示的に陰性」の両方を含むので absent にしない。
+    assert groups["F2"].report_labels.pleural_effusion_status == "unknown"
+
+
+def test_胸水フラグが出力JSONに載る(tmp_path: Path):
+    path = make_report_merged(
+        tmp_path,
+        {
+            "ST1": report_labels("present", observed=["pleural_effusion"]),
+            "ST2": report_labels("present", observed=[]),
+        },
+    )
+    _, options = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present", "absent"),
+    )
+
+    samples = read_dataset(options.out_path)["samples"]
+    assert samples["F1"]["pleural_effusion_status"] == "present"
+    assert samples["F2"]["pleural_effusion_status"] == "unknown"
+    # 気胸とは独立した属性。片方が立っても他方は動かない。
+    assert samples["F1"]["pneumothorax_case"] is True
+
+
+def test_水気胸も気胸として取り込む(tmp_path: Path):
+    """``subtype: hydropneumothorax`` は ``status: present`` なのでそのまま true。"""
+    labels = report_labels("present", side="left")
+    labels["pneumothorax_subtype"] = "hydropneumothorax"
+    path = make_report_merged(tmp_path, {"ST1": labels})
+
+    _, options = export(
+        tmp_path,
+        merged_path=path,
+        label_source="annotations+report",
+        report_statuses=("present", "absent"),
+    )
+
+    samples = read_dataset(options.out_path)["samples"]
+    assert samples["F1"]["pneumothorax_case"] is True
+    assert samples["F1"]["pneumothorax_side"] == "left"
+
+
 def test_レポートでpneumothorax_caseが補完される(tmp_path: Path):
     path = make_report_merged(
         tmp_path,

@@ -157,6 +157,8 @@ selection_decisions.csv : final_decision = keep         ← 開発データに�
 | `dashboard.html` | 以上をブラウザで辿る（`serve` で常駐配信できる） | — |
 | `development.json` | keep だけを反映した開発用データ | 元JSONと同一スキーマ |
 | **`development_merged.json`** | **12本を1本にまとめた学習パイプライン入力** | 元JSON互換 + file entry に `dataset_id` |
+| **`development_manifest.csv`** | **最終開発データに実際に入った画像の明細（症例IDレベル）** | **統合JSONの画像数（必ず1画像=1行）** |
+| `image_duplicates.csv` | データセット横断の同一画像をどちら側で採ったか | 重複した分だけ |
 | **`chest_metry_pi6_pneumothorax.json`** | **学習側（med-chest-metry-pi6）が読む lp-data 標準形式** | 1画像=1サンプル |
 | `lpdata_export_summary.md` | lp-data 書き出しの結果と、**次に人間が決めるべきこと** | — |
 | `mask_merge_manifest.json` | 結合気胸マスクの再現情報（元マスクと期待画素数） | マスクを持つサンプル分 |
@@ -595,6 +597,9 @@ override を使うと `development.json` の meta と `selection_summary.md` に
 → `output/development/<dataset>/<version>/development.json` と
 `output/development/<version>/selection_summary.md`、そして
 `output/development/<version>/development_merged.json`（統合JSON）。
+統合JSONを作った場合は同じディレクトリに
+`development_manifest.csv`（**中身の明細**）が、クロスデータセット重複があれば
+`image_duplicates.csv`（採否の監査）が並ぶ。
 
 #### 統合JSON（学習パイプライン入力）
 
@@ -637,9 +642,66 @@ override を使うと `development.json` の meta と `selection_summary.md` に
 （dataset_id 昇順の先頭）で選ぶ。元データ側の不整合なので、`selection_summary.md`
 に毎回出してデータ管理側への報告材料にする。現状この1件だけ。
 
+★**食い違いの記録は剪定より前**に行う。現状の1件はまさに「画像を出す側で `shape` の z=2、
+画像0枚の側で z=1」という形で、先に剪定すると空の側が統合に参加せず報告されなくなる。
+同じ series が二重登録されているのは元データ側の登録バグであり、
+どちらが画像を出したかとは独立に報告し続ける必要がある。
+これが**剪定を全 merge の完了後に行う理由**で、per-dataset 側を剪定できない理由でもある
+（per-dataset payload は merge へ参照ごと渡して直後に手放す設計なので、
+全 merge の完了まで生き残れない）。
+
+#### 何が入っているか（内訳と明細）
+
+統合JSONは raw 約100MB あり、中身を直接読むものではない。**何が入ったかは2か所で見る。**
+
+1. `selection_summary.md` 末尾の **「何が入っているか（データセット別）」** 表。
+   データセットごとの 施設 / 患者 / study / 画像 / annotation / 0件の画像 / 主な病変クラス。
+2. `development_manifest.csv` —— **1画像=1行の明細**。列は
+   `dataset_id` / `institution` / `patient_id` / `study_key` / `study_date` /
+   `series_key` / `file_id` / `file_uid` / `image_path` / `n_annotations` / `lesion_classes`。
+
+`file_uid` は `image_decisions.csv` / `image_duplicates.csv` / lpdata の
+`measurements.jsonl` と**同じキー**なので、そのまま突合できる
+（「この画像はなぜ入ったのか」を採否まで遡れる）。
+病変クラス × データセットの全行列が要るときは、この明細を
+`dataset_id` × `lesion_classes` で集計する —— 表に載せると横に伸びて読めないため、
+summary 側は上位3クラスだけに留めてある。
+
+**画像と annotation の列は足し上げると合計と一致する**（1画像は必ず1データセットに属する）。
+一方 **施設 / 患者 / study は足し上げても合計と一致しない**。同じ患者・study が複数
+データセットに跨るため（上記の実測: `(institution, study)` は 42,690組中4,274組が跨る）。
+各行は「そのデータセット由来の画像を1枚以上含む患者/study の数」。
+
+内訳表の患者 / study は**画像を1枚以上持つもの**だけを数える。統合JSONは
+**画像を1枚も持たない器（series / study / institution）を剪定してある**ので、
+規模行の study と合計行の study は一致する（食い違ったら剪定が効いていないということなので、
+summary に警告が出る）。
+
+#### 画像0枚の器を剪定する
+
+`build-dataset` は統合JSONを書き出す前に、**file entry を1件も持たない
+series / study / institution を取り除く**。件数は `meta_development.pruned` と
+`selection_summary.md` に必ず出す。実測では series 171 / study 171 / 施設 0。
+
+空の器は判断の結果ではなく**副作用**。元JSON（engineer-set）13本には空の series も
+空の study も1件も無く、`image_decisions` に従って file entry を落とした結果として生まれる
+（実測では images_dropped 3039枚のうち 2833枚がクロスデータセット重複による skip）。
+器を残したまま `totals.studies` を出すと、中身の無い study を数えた不正確な報告になる。
+
+「annotation が0件になっても file entry は残す」規則とは**別の話**。
+file entry は画像が実在するので残す。器は中身が0なら何も表していない。
+**剪定で画像数と annotation 数は1件も動かない**ので母集団は不変。
+
+★**剪定するのは統合JSONだけ**で、per-dataset の `development.json` には空の器が残る
+（実測 合計3005 study。とくに `ETR_ChestMetry_PI6px_pneumothorax_add` は 2682 study 中 2681 が空）。
+統合すると他データセットが同じ study を埋めるので171件まで減る。
+per-dataset 側を剪定しないのは、剪定が**全データセットの merge 完了後**にしか行えないため
+（下の「属性の食い違い」を参照）。per-dataset JSON はどこからも読まれない中間・監査成果物で、
+学習パイプラインへ渡るのは統合JSONの方。
+
 | オプション | 効果 |
 |---|---|
-| `--no-merged` | 統合JSONを作らない（既定は作る） |
+| `--no-merged` | 統合JSONを作らない（既定は作る）。`development_manifest.csv` も作らない —— 明細は「統合JSONに何が入ったか」を表すものなので、統合JSONが無いときに出すと存在しないファイルの目録になる。データセット別の件数は各 `development.json` の `meta_development` にある |
 | `--merged-name NAME` | ファイル名を変える（既定 `development_merged.json`） |
 | `--strict-conflicts` | 属性の食い違いがあれば停止する（CI 向け） |
 
@@ -655,6 +717,14 @@ override を使うと `development.json` の meta と `selection_summary.md` に
   （採否サマリの keep 件数との差は、クロスデータセット画像重複で統合時に
   skip した分。`image_duplicates.csv` を参照）
 - 統合JSONの `(inst, study, series, file_id)` は全件一意。衝突したら**止まる**
+- `development_manifest.csv` の行数 == 統合JSONの画像数（`totals.files`）
+- データセット別の annotation 合計 == 統合の annotation 総数
+  == 12本の `development.json` の keep 合計
+- 統合JSONに **file entry を1件も持たない series / study / institution は存在しない**
+  （剪定は冪等。2回目で何か取れたら `build-dataset` が**止まる**）
+- 剪定で **画像数と annotation 数は1件も変わらない**
+  （`totals.files` / `totals.annotations` は剪定の前後で同値）
+- 統合JSONの `totals.studies` == 内訳表の合計 study（食い違ったら summary に警告が出る）
 
 ### 3.10 単一症例の重畳図（debug 用）
 
@@ -715,6 +785,7 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 | `abnormal_finding_status` | `Findings` の geometry annotation あり→`present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 6,680 / 853 / 35,041 |
 | `pneumothorax_case` | 気胸 annotation が1件以上 | true 3,521 |
 | `bulla_bleb_status` | `bulla_bleb` があれば `present`、他は `unknown`（`absent` は出さない） | present 234 |
+| `pleural_effusion_status` | 胸水 annotation があれば `present` / 明示の `No Findings/normal` あり→`absent` / それ以外→`unknown` | 再エクスポート待ち |
 | `pneumothorax_side` | 常に `null`（患者基準の解剖学的左右で、画像からは起こせない） | — |
 
 拾った所見名（`pneumothorax` / `nodule` 等16語）は**出力属性ではない**。
@@ -741,7 +812,8 @@ uv run segmentation-validation export-lpdata --jobs 16 --image-mode convert ...
 
 残る不変条件は値の範囲だけ（実測で違反0件）:
 
-- `abnormal_finding_status` / `bulla_bleb_status` は `present` / `absent` / `unknown` のいずれか
+- `abnormal_finding_status` / `bulla_bleb_status` / `pleural_effusion_status` は
+  `present` / `absent` / `unknown` のいずれか
 - `pneumothorax_side` が非 null なのは `pneumothorax_case: true` のときだけ
 
 **`lung_rect` は肺野と胸郭の両方のマスクが揃ったときだけ入る。** 片方で代用すると由来の違う
@@ -781,11 +853,10 @@ JPEG Lossless（`1.2.840.10008.1.2.4.70`）で圧縮されており、これを�
 TAG=20260917; OUT=output/lpdata/$TAG
 OFC=../ofuna_chuo_report/output/dataset/merged/engineer-set-ETR_ChestMetry_OFC_report-20260917_004313.json
 
-# 1) OFC 側を lp-data 形式へ（★ マスク出力先を development と分ける。下の警告参照）
+# 1) OFC 側を lp-data 形式へ
 uv run segmentation-validation export-lpdata-ofc --source "$OFC" \
     --out $OUT/ofc_report.lpdata.json --artifact-prefix ofc_ \
-    --mask-output-dir $OUT/masks/pneumothorax_ofc \
-    --image-mode convert --mask-mode generate --jobs 16 \
+    --image-mode convert --jobs 16 \
     --dataset-name chest_metry_pi6_pneumothorax \
     --dataset-id chest_metry_pi6_pneumothorax_2026_003 --owner <あなた>
 
@@ -800,11 +871,61 @@ cat $OUT/lpdata_merge_summary.md
 uv run segmentation-validation merge-lpdata ... （--dry-run を外す）
 ```
 
-> ⚠️ **OFC 段には必ず別の `--mask-output-dir` を与えること。**
-> マスクのファイル名は `<sample_id>.png` で、development と置き場を共有すると
-> **人手で整備したGTマスクを黙って差し替える**（実測で6件、両者のマスクが食い違う）。
-> `merge-lpdata` は重複時に必ず primary のマスクを採り、食い違いを summary に出す。
+#### OFC 段はマスクを作らない（`--mask-mode` の既定が `planned`）
+
+OFC 側の価値は「**マスクが無くても気胸症例だと分かる**」ことであって、
+マスクの供給源ではない。**気胸マスクを持つ画像は例外なく development 側にもあり**、
+統合は重複時に必ず primary（人手整備済みのGT）のマスクを採るので、
+OFC 段で書き出した PNG は1枚も参照されない（実測273枚すべて未参照だった）。
+
+`planned` でも**画素は読む**ので、面積・`lung_rect`・統合時のマスク食い違い検出
+（6件）はそのまま効く。将来 OFC 単独のマスクが増えたら
+`--mask-mode generate` を明示すればよい。
+
+> ⚠️ **`--mask-mode generate` を OFC 段で使うなら、必ず別の `--mask-output-dir` を
+> 与えること。** マスクのファイル名は `<sample_id>.png` で、development と置き場を
+> 共有すると**人手で整備したGTマスクを黙って差し替える**。
 > `--artifact-prefix` も同じ理由（summary / manifest / 計測キャッシュの潰し合いを防ぐ）。
+
+#### どれが最終成果物か
+
+| ファイル | 位置づけ |
+| --- | --- |
+| `<統合タグ>/chest_metry_pi6_pneumothorax.json` | **最終成果物。学習側へ渡すのはこれ** |
+| `<統合タグ>/ofc_report.lpdata.json` | 中間生成物（統合の入力・OFC側） |
+| `<前タグ>/chest_metry_pi6_pneumothorax.json` | 中間生成物（統合の入力・development側） |
+| `lpdata_merge_summary.md` / `lpdata_merge_resolutions.json` | 統合の監査ログ（裁定577件の内訳） |
+| `ofc_report_labels.csv` | certainty 保持用の分析データ（範囲外も含む全件） |
+| `*_export_summary.md` / `*_manifest.json` / `*measurements.jsonl` | export の監査ログ・キャッシュ |
+
+> ⚠️ **`--image-mode planned` で作った入力を統合したJSONは学習に使えない。**
+> `image_file` が「変換予定のパス」を指すだけで実体が無い。
+> `lpdata_merge_summary.md` の冒頭に**参照先が実在しない件数**が出るので、
+> そこが 0 でなければ `--image-mode convert` で作り直して統合し直すこと。
+>
+> 中間生成物の `ofc_report.lpdata.json` は `--mask-mode planned` のとき
+> `pneumothorax_mask` に実体の無いパスを持つ（273件）。これらは統合時に
+> すべて primary のマスクへ差し替わるので**最終成果物には伝播しない**。
+
+#### テンプレートとの差分（意図的なもの）
+
+`meta.structure` は 18属性すべてキー・型・`description`・`label_map`・`defaults` が
+テンプレートと**完全一致**する（丸写ししているので当然だが、ずれたら起動時に落ちる）。
+`meta` の他のキーだけが意図的に違う。
+
+| キー | 扱い |
+| --- | --- |
+| `split` | **書かない。** 本エクスポータは分割をしないため |
+| `description` | テンプレートの文言は `split: train` 前提（「（train split）」）なので、`split` を書かない以上そのままだと矛盾する。**split に触れない文へ差し替える**（`--description` で明示指定も可） |
+| `provenance` | 本エクスポータが足す（出所・裁定・`case_evidence`） |
+| `dataset_name` / `dataset_id` / `owner` / `date` / `source` | 実行時に決める |
+
+> ⚠️ **学習側 `chest_metry_pi6.data.load_dataset_file` では現状読めない。**
+> あちらは `pneumothorax_mask_merged` を要求するが、テンプレート（正典）の属性名は
+> `pneumothorax_mask`。テンプレート冒頭が「コード・README・テストはまだ追随していない
+> （追随は Issue #52）」と明記しているとおり **med-chest-metry-pi6 側の未追随**で、
+> こちらを合わせるとテンプレート違反になる。
+> lp-data 標準の `lpdata.io.load_dataset` では正常に読める。
 
 #### 取り込む範囲
 
@@ -908,6 +1029,9 @@ uv run segmentation-validation merge-lpdata ... （--dry-run を外す）
 Development JSON を生成してよいか: **no**
 ```
 
+統合JSONを作った場合は、さらに末尾に **「何が入っているか（データセット別）」** 表が付く
+（[3.9](#39-開発用データセットを生成する)）。最終開発データの中身はここで分かる。
+
 ### `selection_decisions.csv` — 採否の正本
 
 `build-dataset` はこれだけを見る（`issues.csv` も FiftyOne DB も参照しない）。
@@ -942,6 +1066,40 @@ Development JSON を生成してよいか: **no**
 これは「annotation が0件になっても file entry は残す」規則とは別で、
 **画像を落とすという明示的な判断があったときだけ**母集団を変える。
 画像に `pending` が残っていても既定で停止する。
+
+第3の規則として、**画像を1枚も持たなくなった器（series / study / institution）は
+統合JSONから取り除く**（[3.9](#画像0枚の器を剪定する)）。これは判断ではなく副作用の掃除で、
+画像も annotation も1件も増減しない。file entry は画像が実在するから残し、
+器は中身が0なら何も表していないから残さない。
+
+### `development_manifest.csv` — 最終データに何が入ったか
+
+`build-dataset` が統合JSONと同時に出す、**1画像=1行の明細**。
+「採否がどうなったか」（上2つのCSV）ではなく、
+「**結局どの画像が最終開発データに入ったのか**」に答える。
+
+| 列 | 意味 |
+|---|---|
+| `dataset_id` | 由来データセット（train/test の別を失わないための軸） |
+| `institution` / `patient_id` / `study_key` / `study_date` | 症例の所在 |
+| `series_key` / `file_id` | 画像の所在 |
+| `file_uid` | `image_decisions.csv` / `image_duplicates.csv` / lpdata の `measurements.jsonl` と**同じキー** |
+| `image_path` | 元DICOMのパス（`/mnt` を基準に解決する） |
+| `n_annotations` | この画像に残った annotation 件数（**0 の行もある**） |
+| `lesion_classes` | 病変クラス（`Findings/001\|Findings/010` の `\|` 区切り。無ければ空欄） |
+
+使い分け:
+
+- **データセット別の集計** → `selection_summary.md` の内訳表（人が読む用）
+- **1件ずつ追う / 好きな軸で集計する** → このCSV。
+  `dataset_id` × `lesion_classes` で pivot すれば、病変クラス × データセットの全行列が出る
+- **なぜこの画像が入った/入らなかったのか** → `file_uid` で `image_decisions.csv` と
+  `selection_decisions.csv` へ遡る
+
+`n_annotations == 0` の行を消していないのは意図的で、
+「annotation が0件でも file entry は残す」という母集団の不変条件を明細でも保つため。
+**行（file entry）は残し、器（series / study / 施設）は残さない。**
+前者は画像が実在し、後者は画像が0枚 —— ここがいちばん混同しやすい。
 
 ### `precision.md` — 自動ルールの答え合わせ
 
@@ -1504,6 +1662,7 @@ uv run segmentation-validation --config config/my.json <cmd>
 | **`selection_decisions` の行数 == annotation の件数** | 「全 annotation が必ず1行」が成果物の意味そのもの。毎回 assert |
 | **`image_decisions` の行数 == 画像の件数** | 同上 |
 | **元JSONは変更しない** | `build-dataset` が生成前後で sha256 を照合する |
+| **画像を1枚も持たない器は統合JSONに残さない** | 器を残すと `totals.studies` が中身の無い study を数えてしまう。剪定は画像を1枚も減らさないので母集団は不変。ただし**全 merge の完了後**に行う —— 先に剪定すると「片方が空」の属性食い違いを取り逃す |
 | **`auto:` は機械のみ、`review:` は人間のみ** | Precision を計算できるようにするため。再構築で `auto:` は貼り直し、人間の判定は保持 |
 | **FiftyOne の DB を正本にしない** | DB削除 → `review build` → `review import` で判定が戻ることを実機検証済み |
 | **annotation の判定は Label、画像の判定は Sample** | 1枚に複数 annotation があるので、Sample に付けるとどれがダメか分からない |
@@ -1555,6 +1714,7 @@ review build / launch / status              目視レビュー
 review export / import / precision          判定の往復と答え合わせ
 review migrate-decisions                    目視判定を git 管理の正本へ移す（移行時に一度）
 build-dataset                               development.json × 12 + development_merged.json
+                                            + development_manifest.csv（中身の明細）
 export-lpdata                               統合JSON → lp-data 形式（既存 annotation 由来のラベル）
 export-lpdata-ofc                           読影レポート付き engineer-set → lp-data 形式
 merge-lpdata                                2つの lp-data JSON を統合（--dry-run で裁定だけ確認）

@@ -187,6 +187,12 @@ class ReportLabels:
     pneumothorax_status: str = "unknown"
     pneumothorax_side: str | None = None
     bulla_bleb_status: str = "unknown"
+    #: 胸水の有無。上流の ``report_labels`` には ``bulla_bleb_status`` のような
+    #: 専用キーが**無い**ので、``finding_labels_observed`` に ``pleural_effusion``
+    #: が出たかどうかだけを 2 値（``present`` / ``unknown``）で写す。
+    #: ``absent`` は出さない —— 観測リストに無いのは「記載なし」と「明示的に陰性」の
+    #: 両方を含み、区別できないため。上流が専用キーを持ったらそちらへ切り替える。
+    pleural_effusion_status: str = "unknown"
     #: 観測された陽性所見の数。「レポートは在るが陽性所見が1つも無い」＝
     #: 明示的な陰性根拠かどうかの判定にだけ使う（所見名そのものは持たない）。
     observed_finding_count: int = 0

@@ -127,6 +127,32 @@ def validate_coverage(
     raise TemplateDriftError("\n".join(lines))
 
 
+#: テンプレートの ``description`` が前提にしている split。
+#: テンプレートは ``split: train`` を持つが、本エクスポータは分割をしないので
+#: ``split`` を書かない（``NOT_INHERITED``）。説明文だけ引き継ぐと
+#: 「split は無いのに train split と書いてある」矛盾したファイルになる。
+SPLIT_IN_DESCRIPTION = "（train split）"
+#: 差し替え後の文言。split に言及しない。
+SPLIT_AGNOSTIC_DESCRIPTION = "胸部X線 気胸 Segmentation 用データセット。"
+
+
+def resolve_description(meta: dict[str, Any], override: str | None) -> str | None:
+    """``meta.description`` を決める。
+
+    ``override`` があればそれを使う。無ければテンプレートの文言を引き継ぐが、
+    **split を前提にした文なら split に触れない文へ差し替える**
+    （``split`` を書かないファイルに「train split」と書いてあると誤解を招く）。
+    テンプレート側が文言を変えたら差し替えは効かなくなるので、そのときは
+    引き継いだ文がそのまま出る（勝手に書き換えない）。
+    """
+    if override is not None:
+        return override
+    current = meta.get("description")
+    if isinstance(current, str) and SPLIT_IN_DESCRIPTION in current:
+        return SPLIT_AGNOSTIC_DESCRIPTION
+    return current
+
+
 def unresolved_placeholders(meta: dict[str, Any]) -> list[str]:
     """``<owner>`` のような未解決のダミー値が残っているキーを返す。
 

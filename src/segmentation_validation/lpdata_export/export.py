@@ -37,6 +37,7 @@ from .sample import FIELD_BUILDERS, SampleContext, build_sample
 from .template import (
     Template,
     load_template,
+    resolve_description,
     unresolved_placeholders,
     validate_coverage,
 )
@@ -355,6 +356,7 @@ def _out_of_scope_row(group: FileGroup) -> dict[str, Any]:
             "case_evidence": None,
             "pneumothorax_side": None,
             "bulla_bleb_status": None,
+            "pleural_effusion_status": None,
             "abnormal_finding_status": None,
         }
     )
@@ -388,6 +390,8 @@ def _report_fields(report: Any) -> dict[str, Any]:
         "bulla_bleb_evidence": report.bulla_bleb_evidence,
         "bulla_bleb_certainty_max": report.bulla_bleb_certainty_max,
         "bulla_bleb_certainty_counts": dict(report.bulla_bleb_certainty_counts),
+        "pleural_effusion_status": None,
+        "report_pleural_effusion_status": report.pleural_effusion_status,
         "abnormal_finding_status": None,
         "observed_finding_count": report.observed_finding_count,
         "flags": list(report.flags),
@@ -416,6 +420,7 @@ def _report_row(sample_id: str, group: FileGroup, labels: Any) -> dict[str, Any]
             "case_evidence": labels.case_evidence.value,
             "pneumothorax_side": labels.pneumothorax_side,
             "bulla_bleb_status": labels.bulla_bleb_status,
+            "pleural_effusion_status": labels.pleural_effusion_status,
             "abnormal_finding_status": labels.abnormal_finding_status,
         }
     )
@@ -489,6 +494,9 @@ def _build_meta(
         meta["dataset_id"] = options.dataset_id
     if options.owner:
         meta["owner"] = options.owner
+    description = resolve_description(meta, options.description)
+    if description is not None:
+        meta["description"] = description
 
     meta["content_type"] = "dataset"
     meta["date"] = date.today().isoformat()
